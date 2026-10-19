@@ -122,7 +122,7 @@ export type Layout = {
   reset: boolean        // reset countdown shown at all (smallest drops it)
   compactReset: boolean // "2d" vs "2d 2h"
   compactLabels: boolean// Wk / 5h / tok/s / Ctx
-  quotaLabels: boolean  // the Wk / 5h labels at all (the two narrowest drop them)
+  quotaLabels: boolean  // the Wk / 5h labels at all (only the narrowest drops them)
   context: boolean      // the Context pill at all (only the narrowest drops it)
   bolt: boolean
   speed: boolean        // token-speed pill shown (smallest drops it)
@@ -133,8 +133,9 @@ export type Layout = {
 //   0 biggest   everything
 //   1 small     short labels (Wk, 5h, tok/s, Ctx), one countdown unit, ⚡ kept
 //   2 smaller   no reset times and no token-speed pill
-//   3 narrow    no Wk / 5h labels, so each quota pill is a track and a figure
-//   4 smallest  no Context pill, so both quota figures still fit whole
+//   3 narrow    no Context pill: the Wk / 5h labels outlast it, since a figure
+//               with no label is the harder thing to read
+//   4 smallest  no Wk / 5h labels, so each quota pill is a track and a figure
 // The labels have a step of their own: tied to the reset times, they went while
 // there was still plenty of room for them.
 export const LEVELS = 5
@@ -146,8 +147,8 @@ export function layoutFor(level: number): Layout {
     reset: level < 2,
     compactReset: level >= 1,
     compactLabels: level >= 1,
-    quotaLabels: level < 3,
-    context: level < 4,
+    quotaLabels: level < 4,
+    context: level < 3,
     bolt: true, // the ⚡ stays wherever token speed shows
     speed: level < 2,
     // The least a track may be for a size to count as fitting. It grows into

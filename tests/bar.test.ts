@@ -62,13 +62,18 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(like(words, /tok/)).toBe(0)
   })
 
-  test(`${surface}: the narrow size drops the Wk and 5h labels but keeps Ctx`, async ($, on) => {
+  test(`${surface}: the narrow size drops Ctx but keeps the Wk and 5h labels`, async ($, on) => {
     mock.clock(on, { now: Date.now() })
-    // the narrow size with no data yet: desktop 29–34, terminal 35–40
-    const ui = await $.ui.mount({ plugin: 'usage-bar', surface, component: 'AbovePrompt', props: props(surface === 'desktop' ? 32 : 38) })
+    // the widest row the narrow size is chosen at, with no data yet
+    const none = { weekly: ['—', '—', '—'], five: ['—', '—', '—'], speed: '—', context: '—' }
+    let columns = 160
+    while (columns > 0 && fitLevel(columns, surface === 'terminal', none) !== LEVELS - 2) columns--
+    expect(columns > 0).toBe(true)
+    const ui = await $.ui.mount({ plugin: 'usage-bar', surface, component: 'AbovePrompt', props: props(columns) })
     const words = await shown(ui)
-    expect(exactly(words, 'Wk') + exactly(words, '5h') + exactly(words, 'Weekly') + exactly(words, '5-hour')).toBe(0)
-    expect(exactly(words, 'Ctx')).toBe(1)
+    expect(exactly(words, 'Wk')).toBe(1)
+    expect(exactly(words, '5h')).toBe(1)
+    expect(exactly(words, 'Ctx')).toBe(0)
   })
 }
 
@@ -135,14 +140,14 @@ test('sizes step down in order, fullest that fits', () => {
 })
 
 // Five sizes. Small shortens the labels and countdowns; smaller gives up the reset
-// times and the token-speed pill; narrow the Wk / 5h labels; smallest Context.
+// times and the token-speed pill; narrow Context; smallest the Wk / 5h labels.
 test('five sizes, each giving up the next thing', () => {
   expect(LEVELS).toBe(5)
   const ladder = Array.from({ length: LEVELS }, (_, i) => layoutFor(i))
   expect(ladder.map(L => L.reset)).toEqual([true, true, false, false, false])
   expect(ladder.map(L => L.speed)).toEqual([true, true, false, false, false])
-  expect(ladder.map(L => L.quotaLabels)).toEqual([true, true, true, false, false])
-  expect(ladder.map(L => L.context)).toEqual([true, true, true, true, false])
+  expect(ladder.map(L => L.quotaLabels)).toEqual([true, true, true, true, false])
+  expect(ladder.map(L => L.context)).toEqual([true, true, true, false, false])
   expect(ladder.map(L => L.compactLabels)).toEqual([false, true, true, true, true])
   // nothing is ever given up and then taken back lower down
   for (const key of ['reset', 'speed', 'quotaLabels', 'context'] as const) {
@@ -151,9 +156,11 @@ test('five sizes, each giving up the next thing', () => {
   }
 })
 
-test('only the narrowest size drops the Context pill', () => {
-  expect(layoutFor(LEVELS - 1).context).toBe(false)
-  for (let level = 0; level < LEVELS - 1; level++) {
+test('Context goes before the Wk and 5h labels, which only the narrowest drops', () => {
+  expect(layoutFor(LEVELS - 2).context).toBe(false)
+  expect(layoutFor(LEVELS - 2).quotaLabels).toBe(true)
+  expect(layoutFor(LEVELS - 1).quotaLabels).toBe(false)
+  for (let level = 0; level < LEVELS - 2; level++) {
     expect(layoutFor(level).context).toBe(true)
   }
 })
