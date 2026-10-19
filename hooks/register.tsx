@@ -18,8 +18,11 @@ const tick = atom({ plugin: 'usage-bar', key: 'tick' } as const, 0)
 // ---- pure presentation rules (same policy as the original metrics.mjs) ----
 
 export const clampPercent = (n: number) => Math.max(0, Math.min(100, n))
+// What is left, from what is used rounded to a whole point the way the Claude
+// app's own usage panel rounds it (Math.round): 1.5% used is "2% used" there and
+// 98% left here, never 99%.
 export const remainingPercent = (n: number | null | undefined) =>
-  Number.isFinite(n) ? 100 - clampPercent(n as number) : null
+  Number.isFinite(n) ? 100 - Math.round(clampPercent(n as number)) : null
 export const percentText = (n: number | null | undefined) =>
   Number.isFinite(n) ? `${Math.round(n as number)}%` : '—'
 
@@ -224,17 +227,25 @@ const sameLimits = (a: readonly SessionRateLimit[], b: readonly SessionRateLimit
   JSON.stringify(a.map(l => [l.kind, l.percentUsed, l.resetsAt])) === JSON.stringify(b.map(l => [l.kind, l.percentUsed, l.resetsAt]))
 
 // What a chat shows, held in a box its hooks share.
-type Shown = { current: Reading }
+type Shown = { current: Reading; drawn?: readonly SessionRateLimit[] }
+
+// Draws `limits`, keeping Context as it is; a no-op when that is what is on
+// screen already.
+async function draw($: any, box: Shown, limits: readonly SessionRateLimit[], context?: SessionContextUsage) {
+  if (context === undefined && box.drawn && sameLimits(limits, box.drawn)) return
+  box.drawn = limits
+  await update($, usage, (u: any) => {
+    const next = toUsage(limits, context ?? ({ window: 0 } as SessionContextUsage))
+    return context === undefined ? { ...next, context: u?.context ?? null } : next
+  })
+}
 
 // Shows `limits` (keeping Context as it is) and, for a reading of this chat's
 // own, saves it for the others.
 async function adopt($: any, box: Shown, limits: readonly SessionRateLimit[], at: number, save: boolean) {
   if (!limits.length) return
-  const changed = !sameLimits(limits, box.current.limits)
   box.current = { at, limits }
-  if (changed) {
-    await update($, usage, (u: any) => ({ ...toUsage(limits, { window: 0 } as SessionContextUsage), context: u?.context ?? null }))
-  }
+  await draw($, box, limits)
   if (save) {
     try { await $.store.set(LATEST_LIMITS, { at, limits }) } catch { /* a reading not kept is only a slower start next time */ }
   }
@@ -275,7 +286,7 @@ export const register: Register = on => {
     const saved = await savedReading($)
     const own = u.rateLimits.length ? { at: await $.clock.now(), limits: u.rateLimits } : saved
     box.current = own
-    await update($, usage, () => toUsage(own.limits, u.context))
+    await draw($, box, own.limits, u.context)
     if (u.rateLimits.length) {
       try { await $.store.set(LATEST_LIMITS, own) } catch { /* see adopt */ }
     }
@@ -295,7 +306,7 @@ export const register: Register = on => {
     if (e.rateLimits.length) {
       const at = await $.clock.now()
       box.current = { at, limits: e.rateLimits }
-      await update($, usage, () => toUsage(e.rateLimits, e.context))
+      await draw($, box, e.rateLimits, e.context)
       try { await $.store.set(LATEST_LIMITS, box.current) } catch { /* a reading not kept is only a slower start next time */ }
     } else {
       // A measurement with no limits in it says only that context moved, as a new
@@ -306,7 +317,7 @@ export const register: Register = on => {
       const saved = await savedReading($)
       const latest = saved.at >= box.current.at ? saved : box.current
       box.current = latest
-      await update($, usage, () => toUsage(latest.limits, e.context))
+      await draw($, box, latest.limits, e.context)
     }
     return next(e)
   })

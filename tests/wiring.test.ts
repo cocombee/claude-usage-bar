@@ -29,7 +29,7 @@ test('session start reads $.session.usage: 5-hour, weekly and context', async ($
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   const ui = await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) })
   // remaining = 100 − used, rounded
-  expect(await has(ui, '38%')).toBe(true)   // 5-hour: 100 − 62.5
+  expect(await has(ui, '37%')).toBe(true)   // 5-hour: 62.5 used is "63% used" in the app, so 37 left
   expect(await has(ui, '59%')).toBe(true)   // weekly: 100 − 41
   expect(await has(ui, '25%')).toBe(true)   // context
   expect(await has(ui, '3h 20m')).toBe(true)
