@@ -1,0 +1,6 @@
+# Local debug log of what the bar drew
+evidence.json
+# Personal launcher with local paths
+run-usage-bar.command
+.DS_Store
+node_modules/

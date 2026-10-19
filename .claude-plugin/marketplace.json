@@ -1,0 +1,11 @@
+{
+  "name": "cocombee",
+  "owner": { "name": "cocombee" },
+  "plugins": [
+    {
+      "name": "usage-bar",
+      "source": "./",
+      "description": "5-hour usage, weekly usage, token speed and context in one row above the prompt"
+    }
+  ]
+}
