@@ -2,6 +2,11 @@
 
 See your 5-hour usage, weekly usage, response speed and context just above the Claude prompt.
 
+<p align="center">
+  <img src="assets/usage-bar-hero.png" alt="Usage Bar above the Claude Code prompt: Weekly 94%, 5-hour 62%, token speed ~68 token/s, Context 20%" width="49%">
+  <img src="assets/usage-bar-responsive.png" alt="Usage Bar at five window widths, from full labels down to just the two quota figures" width="49%">
+</p>
+
 **Weekly → 5-hour → Token speed → Context**
 
 The design is adopted from [codex-usage-bar](https://github.com/cocombee/codex-usage-bar); the wiring is new and uses Claude's own plugin API, so nothing in the app is patched or re-signed.
