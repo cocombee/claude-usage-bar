@@ -206,14 +206,46 @@ export function fitLevel(columns: number, isTerminal: boolean, t: Texts) {
   return LEVELS - 1
 }
 
-// The last 5-hour and weekly reading any session saw, kept in the plugin's own
-// store between sessions (see session.start below).
+// The last 5-hour and weekly reading any session saw, with when it was taken,
+// kept in the plugin's own store: one JSON file every chat shares (see
+// session.start below). The older key held the limits alone, with no time.
+const LATEST_LIMITS = 'latestRateLimits'
 const LAST_LIMITS = 'lastRateLimits'
-async function savedLimits($: any): Promise<readonly SessionRateLimit[]> {
+type Reading = { at: number; limits: readonly SessionRateLimit[] }
+async function savedReading($: any): Promise<Reading> {
   try {
-    const v = await $.store.get(LAST_LIMITS)
-    return Array.isArray(v) ? (v as SessionRateLimit[]) : []
-  } catch { return [] }
+    const v: any = await $.store.get(LATEST_LIMITS)
+    if (v && Array.isArray(v.limits) && Number.isFinite(v.at)) return { at: v.at, limits: v.limits }
+    const old = await $.store.get(LAST_LIMITS)
+    return { at: 0, limits: Array.isArray(old) ? (old as SessionRateLimit[]) : [] }
+  } catch { return { at: 0, limits: [] } }
+}
+const sameLimits = (a: readonly SessionRateLimit[], b: readonly SessionRateLimit[]) =>
+  JSON.stringify(a.map(l => [l.kind, l.percentUsed, l.resetsAt])) === JSON.stringify(b.map(l => [l.kind, l.percentUsed, l.resetsAt]))
+
+// What a chat shows, held in a box its hooks share.
+type Shown = { current: Reading }
+
+// Shows `limits` (keeping Context as it is) and, for a reading of this chat's
+// own, saves it for the others.
+async function adopt($: any, box: Shown, limits: readonly SessionRateLimit[], at: number, save: boolean) {
+  if (!limits.length) return
+  const changed = !sameLimits(limits, box.current.limits)
+  box.current = { at, limits }
+  if (changed) {
+    await update($, usage, (u: any) => ({ ...toUsage(limits, { window: 0 } as SessionContextUsage), context: u?.context ?? null }))
+  }
+  if (save) {
+    try { await $.store.set(LATEST_LIMITS, { at, limits }) } catch { /* a reading not kept is only a slower start next time */ }
+  }
+}
+
+// A reading of this chat's own: shown, and shared with the other chats.
+async function ownReading($: any, box: Shown) {
+  try {
+    const u = await $.session.usage()
+    if (u.rateLimits.length) await adopt($, box, u.rateLimits, await $.clock.now(), true)
+  } catch { /* the next reading lands it */ }
 }
 
 export const register: Register = on => {
@@ -223,6 +255,12 @@ export const register: Register = on => {
   // The model's context window in tokens, from the last usage reading; the
   // per-response context fill below is measured against it.
   let contextWindow: number | null = null
+  // The limits this chat shows and when they were read, by this chat or another.
+  // Every chat writes its newest reading to the shared store and every chat looks
+  // there on its clock tick, so a reading one chat gets (a reply, or the limits
+  // Anthropic reset early) reaches the others within the tick, not at their own
+  // next reply.
+  const box: Shown = { current: { at: 0, limits: [] } }
 
   // The 5-hour and weekly limits arrive with the API's reply to a request, so a
   // new chat has none until its first message and the bar sat at "—" till then.
@@ -233,11 +271,21 @@ export const register: Register = on => {
     const result = await next(e)
     const u = await $.session.usage()
     if (Number.isFinite(u.context?.window)) contextWindow = u.context.window
-    // This chat's own reading wins; until it has one, the last one saved.
-    const limits = u.rateLimits.length ? u.rateLimits : await savedLimits($)
-    await update($, usage, () => toUsage(limits, u.context))
-    // Keep reset countdowns moving between API responses.
-    $.clock.every(30_000, () => void update($, tick, t => t + 1))
+    // This chat's own reading wins; until it has one, the newest one saved.
+    const saved = await savedReading($)
+    const own = u.rateLimits.length ? { at: await $.clock.now(), limits: u.rateLimits } : saved
+    box.current = own
+    await update($, usage, () => toUsage(own.limits, u.context))
+    if (u.rateLimits.length) {
+      try { await $.store.set(LATEST_LIMITS, own) } catch { /* see adopt */ }
+    }
+    // Keep reset countdowns moving between API responses, and pick up a newer
+    // reading another chat saved meanwhile.
+    $.clock.every(30_000, () => void (async () => {
+      const latest = await savedReading($)
+      if (latest.at > box.current.at) await adopt($, box, latest.limits, latest.at, false)
+      await update($, tick, t => t + 1)
+    })())
     return result
   })
 
@@ -245,16 +293,20 @@ export const register: Register = on => {
   on('session.measure', async ($, e, next) => {
     if (Number.isFinite(e.context?.window)) contextWindow = e.context.window
     if (e.rateLimits.length) {
+      const at = await $.clock.now()
+      box.current = { at, limits: e.rateLimits }
       await update($, usage, () => toUsage(e.rateLimits, e.context))
-      try { await $.store.set(LAST_LIMITS, e.rateLimits) } catch { /* a reading not kept is only a slower start next time */ }
+      try { await $.store.set(LATEST_LIMITS, box.current) } catch { /* a reading not kept is only a slower start next time */ }
     } else {
       // A measurement with no limits in it says only that context moved, as a new
       // chat's does before its first reply: it is not a reading of none. Taking
       // it as one wiped the saved limits the moment the chat opened, leaving dark
       // tracks and dashes. The last known limits stand; their reset times still
       // turn a stale one into "—".
-      const limits = await savedLimits($)
-      await update($, usage, () => toUsage(limits, e.context))
+      const saved = await savedReading($)
+      const latest = saved.at >= box.current.at ? saved : box.current
+      box.current = latest
+      await update($, usage, () => toUsage(latest.limits, e.context))
     }
     return next(e)
   })
@@ -296,6 +348,8 @@ export const register: Register = on => {
             await update($, usage, u => ({ fiveHour: u?.fiveHour ?? null, weekly: u?.weekly ?? null, context: live.percent as number }))
           }
         } catch { /* the end-of-response reading below still lands */ }
+        // The limits this request was answered under, as early as they are known.
+        await ownReading($, box)
       }
       step = await stream.next()
     }
@@ -308,6 +362,7 @@ export const register: Register = on => {
       const percent = Math.round((input / contextWindow) * 100)
       await update($, usage, u => ({ fiveHour: u?.fiveHour ?? null, weekly: u?.weekly ?? null, context: percent }))
     }
+    await ownReading($, box)
     if (e.turnId !== activeTurn) return result
     const output = result.usage?.output_tokens ?? 0
     if (e.turnId === activeTurn && output > 0 && seconds >= 0.25) {

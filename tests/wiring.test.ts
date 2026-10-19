@@ -251,3 +251,59 @@ test('context moves at the first piece of a response, before it ends', async ($,
   expect(await has(ui, '20%')).toBe(true)
   for await (const _ of stream) { /* drain */ }
 })
+
+// One store every chat shares: a test writes to it as another chat would.
+function sharedStore(on: any, initial: Record<string, unknown> = {}) {
+  const db: Record<string, unknown> = { ...initial }
+  on('store.get', (_$: any, e: any) => ({ value: db[e.key] }))
+  on('store.set', (_$: any, e: any) => { db[e.key] = JSON.parse(JSON.stringify(e.value)); return { value: undefined } })
+  on('store.delete', (_$: any, e: any) => { delete db[e.key]; return { value: undefined } })
+  on('store.keys', () => ({ value: Object.keys(db) }))
+  return db
+}
+
+// Another chat's newer reading (a reply there, or limits reset early) reaches
+// this chat on its next clock tick, not at its own next reply.
+test('a newer reading saved by another chat shows here within the tick', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const db = sharedStore(on)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [
+    { kind: 'five_hour', percentUsed: 12, resetsAt: new Date(clock.now() + 2 * HOUR).toISOString() },
+  ] } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const mount = () => $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) })
+  expect(await has(await mount(), '88%')).toBe(true)
+  db.latestRateLimits = { at: clock.now() + 1000, limits: [
+    { kind: 'five_hour', percentUsed: 13, resetsAt: new Date(clock.now() + 2 * HOUR).toISOString() },
+  ] }
+  await clock.advance(31_000)
+  expect(await has(await mount(), '87%')).toBe(true)
+})
+
+// The limits are read with each response of this chat, not only when a
+// measurement comes, and saved for the other chats with when they were read.
+test('each response reads the limits and shares them with the other chats', async ($, on) => {
+  const clock = mock.clock(on, { now: 5_000_000 })
+  const db = sharedStore(on)
+  let used = 12
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 10, window: 100, percent: 10 }, rateLimits: [
+    { kind: 'five_hour', percentUsed: used, resetsAt: new Date(clock.now() + 2 * HOUR).toISOString() },
+  ] } }))
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  on('turn.step', async function* (_$, e) {
+    used = 13
+    yield { kind: 'text', index: 0, text: 'Hi' } as any
+    return { turnId: e.turnId, index: e.index, answer: 'Hi', toolUses: [], stopReason: 'end_turn', usage: { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'm' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) })
+  expect(await has(ui, '88%')).toBe(true)
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  await step($, 't1', 0)
+  expect(await has(ui, '87%')).toBe(true)
+  const saved: any = db.latestRateLimits
+  expect(saved.limits[0].percentUsed).toBe(13)
+  expect(saved.at).toBe(clock.now())
+})
