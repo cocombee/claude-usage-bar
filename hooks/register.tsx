@@ -215,6 +215,8 @@ export function fitLevel(columns: number, isTerminal: boolean, t: Texts) {
 const LATEST_LIMITS = 'latestRateLimits'
 const LAST_LIMITS = 'lastRateLimits'
 type Reading = { at: number; limits: readonly SessionRateLimit[] }
+// How often a chat looks for a newer reading from another chat.
+export const SYNC_EVERY = 5_000
 async function savedReading($: any): Promise<Reading> {
   try {
     const v: any = await $.store.get(LATEST_LIMITS)
@@ -290,13 +292,14 @@ export const register: Register = on => {
     if (u.rateLimits.length) {
       try { await $.store.set(LATEST_LIMITS, own) } catch { /* see adopt */ }
     }
-    // Keep reset countdowns moving between API responses, and pick up a newer
-    // reading another chat saved meanwhile.
-    $.clock.every(30_000, () => void (async () => {
+    // Pick up a newer reading another chat saved, within a few seconds: a read
+    // of one small file, and a redraw only when the figures moved.
+    $.clock.every(SYNC_EVERY, () => void (async () => {
       const latest = await savedReading($)
       if (latest.at > box.current.at) await adopt($, box, latest.limits, latest.at, false)
-      await update($, tick, t => t + 1)
     })())
+    // Keep reset countdowns moving between API responses.
+    $.clock.every(30_000, () => void update($, tick, t => t + 1))
     return result
   })
 

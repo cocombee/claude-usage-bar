@@ -264,7 +264,7 @@ function sharedStore(on: any, initial: Record<string, unknown> = {}) {
 
 // Another chat's newer reading (a reply there, or limits reset early) reaches
 // this chat on its next clock tick, not at its own next reply.
-test('a newer reading saved by another chat shows here within the tick', async ($, on) => {
+test('a newer reading saved by another chat shows here within seconds', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const db = sharedStore(on)
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
@@ -277,7 +277,7 @@ test('a newer reading saved by another chat shows here within the tick', async (
   db.latestRateLimits = { at: clock.now() + 1000, limits: [
     { kind: 'five_hour', percentUsed: 13, resetsAt: new Date(clock.now() + 2 * HOUR).toISOString() },
   ] }
-  await clock.advance(31_000)
+  await clock.advance(6_000)
   expect(await has(await mount(), '87%')).toBe(true)
 })
 
