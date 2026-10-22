@@ -1,6 +1,7 @@
 import { test, expect, mock } from 'claude-code/testing'
 
 import { shown, exactly } from './shown'
+import { repairStore } from '../hooks/register'
 
 // Wiring: every figure comes from the engine's own events, as a session raises them.
 
@@ -261,6 +262,35 @@ function sharedStore(on: any, initial: Record<string, unknown> = {}) {
   on('store.keys', () => ({ value: Object.keys(db) }))
   return db
 }
+
+// The bar can be drawn before this chat's hooks have read anything: the saved
+// reading is in the store already, so it shows at once, not at the first sync tick.
+test('the first draw shows the saved limits before any hook has run', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  sharedStore(on, { latestRateLimits: { at: clock.now(), limits: [
+    { kind: 'five_hour', percentUsed: 30, resetsAt: new Date(clock.now() + 2 * HOUR).toISOString() },
+    { kind: 'seven_day', percentUsed: 9, resetsAt: new Date(clock.now() + 3 * 24 * HOUR).toISOString() },
+  ] } })
+  const ui = await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) })
+  expect(await has(ui, '70%')).toBe(true)   // 5-hour: 100 − 30
+  expect(await has(ui, '91%')).toBe(true)   // weekly: 100 − 9
+})
+
+// A crash mid-write left the store file as null bytes; the engine refused every
+// call on it until the file was replaced, so the file its error names is reset.
+// (A store hook that throws is skipped by the test engine rather than raised, so
+// the repair is checked against the engine's own wording here.)
+test('a store the engine calls malformed is reset to an empty one; other errors are left alone', async () => {
+  const file = 'C:\\Users\\u\\.claude\\plugins\\store\\usage-bar_cocombee-c8e91c72c9b9.json'
+  const writes: [string, string][] = []
+  const $ = { fs: { write: async (path: string, text: string) => { writes.push([path, text]) } } }
+  const malformed = new Error(`usage-bar: store file ${file} is malformed (JSON Parse error: Unrecognized token '\0')`)
+  expect(await repairStore($, malformed)).toBe(true)
+  expect(writes).toEqual([[file, '{}\n']])
+  expect(await repairStore($, new Error(`usage-bar: store file ${file} is unreadable (EACCES)`))).toBe(false)
+  expect(await repairStore($, new Error('usage-bar: $.store.set failed: EBUSY'))).toBe(false)
+  expect(writes.length).toBe(1)
+})
 
 // Another chat's newer reading (a reply there, or limits reset early) reaches
 // this chat on its next clock tick, not at its own next reply.

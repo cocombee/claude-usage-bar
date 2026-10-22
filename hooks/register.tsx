@@ -218,13 +218,39 @@ const LAST_LIMITS = 'lastRateLimits'
 type Reading = { at: number; limits: readonly SessionRateLimit[] }
 // How often a chat looks for a newer reading from another chat.
 export const SYNC_EVERY = 5_000
+
+// A crash while the store file is being written can leave it as a run of null
+// bytes (seen on Windows after an unclean reboot). The engine then refuses every
+// $.store call on it, get and set alike, so the saved reading never came back and
+// every new chat sat at "—" until its first reply. Its error names the file; a
+// store that is not JSON holds nothing worth keeping, so it is reset to an empty one.
+const MALFORMED_STORE = /store file (.+?) is malformed \(/
+export async function repairStore($: any, err: unknown) {
+  const path = MALFORMED_STORE.exec(String((err as any)?.message ?? err))?.[1]
+  if (!path) return false
+  try { await $.fs.write(path, '{}\n'); return true } catch { return false }
+}
+
 async function savedReading($: any): Promise<Reading> {
-  try {
-    const v: any = await $.store.get(LATEST_LIMITS)
-    if (v && Array.isArray(v.limits) && Number.isFinite(v.at)) return { at: v.at, limits: v.limits }
-    const old = await $.store.get(LAST_LIMITS)
-    return { at: 0, limits: Array.isArray(old) ? (old as SessionRateLimit[]) : [] }
-  } catch { return { at: 0, limits: [] } }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const v: any = await $.store.get(LATEST_LIMITS)
+      if (v && Array.isArray(v.limits) && Number.isFinite(v.at)) return { at: v.at, limits: v.limits }
+      const old = await $.store.get(LAST_LIMITS)
+      return { at: 0, limits: Array.isArray(old) ? (old as SessionRateLimit[]) : [] }
+    } catch (err) {
+      if (attempt > 0 || !(await repairStore($, err))) break
+    }
+  }
+  return { at: 0, limits: [] }
+}
+
+// A reading not kept is only a slower start next time; a store found broken is
+// repaired and the reading written once more.
+async function saveReading($: any, reading: Reading) {
+  try { await $.store.set(LATEST_LIMITS, reading) } catch (err) {
+    if (await repairStore($, err)) { try { await $.store.set(LATEST_LIMITS, reading) } catch { /* see above */ } }
+  }
 }
 const sameLimits = (a: readonly SessionRateLimit[], b: readonly SessionRateLimit[]) =>
   JSON.stringify(a.map(l => [l.kind, l.percentUsed, l.resetsAt])) === JSON.stringify(b.map(l => [l.kind, l.percentUsed, l.resetsAt]))
@@ -249,9 +275,7 @@ async function adopt($: any, box: Shown, limits: readonly SessionRateLimit[], at
   if (!limits.length) return
   box.current = { at, limits }
   await draw($, box, limits)
-  if (save) {
-    try { await $.store.set(LATEST_LIMITS, { at, limits }) } catch { /* a reading not kept is only a slower start next time */ }
-  }
+  if (save) await saveReading($, { at, limits })
 }
 
 // A reading of this chat's own: shown, and shared with the other chats.
@@ -290,9 +314,7 @@ export const register: Register = on => {
     const own = u.rateLimits.length ? { at: await $.clock.now(), limits: u.rateLimits } : saved
     box.current = own
     await draw($, box, own.limits, u.context)
-    if (u.rateLimits.length) {
-      try { await $.store.set(LATEST_LIMITS, own) } catch { /* see adopt */ }
-    }
+    if (u.rateLimits.length) await saveReading($, own)
     // Pick up a newer reading another chat saved, within a few seconds: a read
     // of one small file, and a redraw only when the figures moved.
     $.clock.every(SYNC_EVERY, () => void (async () => {
@@ -311,7 +333,7 @@ export const register: Register = on => {
       const at = await $.clock.now()
       box.current = { at, limits: e.rateLimits }
       await draw($, box, e.rateLimits, e.context)
-      try { await $.store.set(LATEST_LIMITS, box.current) } catch { /* a reading not kept is only a slower start next time */ }
+      await saveReading($, box.current)
     } else {
       // A measurement with no limits in it says only that context moved, as a new
       // chat's does before its first reply: it is not a reading of none. Taking
@@ -410,7 +432,12 @@ export const register: Register = on => {
     const { Box, Text, Svg } = $.ui.resolve(e) as ReturnType<typeof $.ui.resolve> & { Svg?: any }
 
     await read($, tick)
-    const u = await read($, usage)
+    // Until this chat's hooks have drawn a reading, the saved one is drawn straight
+    // from the store: the figures are already there, and waiting for the hooks left
+    // a new chat's quota pills at "—" for the first sync tick (5s).
+    const held = await read($, usage)
+    const saved = held?.fiveHour || held?.weekly ? null : (await savedReading($)).limits
+    const u = saved?.length ? { ...toUsage(saved, { window: 0 } as SessionContextUsage), context: held?.context ?? null } : held
     const tps = await read($, speed)
     const now = await $.clock.now()
     // No inset of the row's own: the band's own gap above the pills is the gap
