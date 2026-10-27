@@ -3,11 +3,13 @@ import type { Register, SessionRateLimit, SessionContextUsage } from 'claude-cod
 
 import type { Usage, Window } from '../types'
 
-// Design adopted from cocombee/codex-usage-bar:
-//   Weekly → 5-hour (in the Files-changed slot) → Token speed → Context
-// Rounded pills, a remaining-quota track, yellow at ≤20% left, red at ≤10%,
-// missing values shown as "—" (never a fabricated zero), and staged shortening
-// of labels as the row narrows so it always stays one row.
+// Order adopted from cocombee/codex-usage-bar:
+//   Weekly → 5-hour → Token speed → Context
+// One open row, no container around any figure: the four readings sit side by
+// side with a thin divider between them. A remaining-quota track, yellow at ≤20%
+// left, red at ≤10% (the figure takes the same colour), missing values shown as
+// "—" (never a fabricated zero), and staged shortening of labels as the row
+// narrows so it always stays one row — on the terminal one line, not three.
 // Colors are the chat box's own theme keys (promptBorder, inactive, subtle),
 // so the bar follows the person's theme and light/dark mode like the prompt.
 
@@ -44,6 +46,10 @@ export type Tone = 'normal' | 'warning' | 'low'
 export function quotaTone(remaining: number | null): Tone {
   return remaining == null ? 'normal' : remaining <= 10 ? 'low' : remaining <= 20 ? 'warning' : 'normal'
 }
+// Context counts up, so its warning mirrors the quotas': 80% used is 20% left.
+export function contextTone(used: number | null): Tone {
+  return quotaTone(used == null ? null : 100 - Math.round(clampPercent(used)))
+}
 
 function pickWindow(limits: readonly SessionRateLimit[], kind: string): Window | null {
   const w = limits.find(l => l.kind === kind)
@@ -69,26 +75,38 @@ function windowState(w: Window | null, now: number) {
 // The track: 4.5px tall (the user's pick over the original's 5.6px), fully rounded; fill = text color,
 // warning #e3b341, low #e54d4d; the empty part is the text color at 10%.
 export const TRACK_HEIGHT = 4.5
-// Inner left/right padding of every pill, in cells (desktop draws its own size).
-export const PILL_PADDING = 2
-// Cells between two pills, at every size.
-export const PILL_GAP = 1
+// Cells of space either side of a divider: one on the terminal, where a cell is
+// a whole character, two on the desktop, whose cells are narrow.
+export const DIVIDER_GAP = { terminal: 1, desktop: 2 } as const
+// The width of a desktop cell, in points, measured off the desktop.
+const CELL = 7.75
+// The divider: the terminal's │ in the prompt box's border colour; on the desktop
+// a 1px hairline as tall as the text's capitals, the text colour at 18% (an
+// SVG cannot name a theme key), so it reads as a rule rather than a glyph.
+export const DIVIDER_HEIGHT = 12
+export const DIVIDER_SVG =
+  `<svg xmlns="http://www.w3.org/2000/svg" width="1" height="${DIVIDER_HEIGHT}" viewBox="0 0 1 ${DIVIDER_HEIGHT}">` +
+  `<style>.d{fill:#0b0b0b;opacity:.18}@media(prefers-color-scheme:dark){.d{fill:#eeeeee}}</style>` +
+  `<rect class="d" width="1" height="${DIVIDER_HEIGHT}"/></svg>`
 // How much of a cell one character of text takes on the desktop, whose font is
 // proportional: measured off the desktop at about 7.75pt a cell, "Ctx" is 18pt
 // and "8%" 16pt.
 export const DESKTOP_TEXT = 0.85
 
-// Desktop only: what the row adds at its left and right, in points, so the gap
-// from the band's edge to the pills there equals the band's gap above them.
-// Measured off the desktop at 2x: 18-19px above the pills, 14px at their side
-// with no inset, so about 2.5pt short a side. A cell (7.75pt) was far too much,
-// and a margin comes only in whole cells, so it is a blank drawing this wide
-// (CSS pixels, as Svg sizes are). An empty drawing with a blank alt was dropped
-// by the desktop, so it holds a clear rect and says what it is.
-export const SIDE_INSET = 2.5
+// Desktop only: what the row adds at its left and right, in points, so the first
+// and last reading sit as far from the band's edge as a reading sits from a
+// divider (DIVIDER_GAP cells). The band gives 7pt of it itself (measured off the
+// desktop at 2x: 14px from its edge to the old pills). A margin comes only in
+// whole cells, so it is a blank drawing this wide (CSS pixels, as Svg sizes are).
+// An empty drawing with a blank alt was dropped by the desktop, so it holds a
+// clear rect and says what it is.
+const BAND_SIDE = 7
+export const SIDE_INSET = DIVIDER_GAP.desktop * CELL - BAND_SIDE
 export const SIDE_SVG =
   `<svg xmlns="http://www.w3.org/2000/svg" width="${SIDE_INSET}" height="${TRACK_HEIGHT}" viewBox="0 0 ${SIDE_INSET} ${TRACK_HEIGHT}">` +
   `<rect width="${SIDE_INSET}" height="${TRACK_HEIGHT}" fill="#000" fill-opacity="0"/></svg>`
+// The cells the two side drawings take on the desktop (a cell is about 7.75pt).
+export const SIDE_CELLS = Math.ceil((2 * SIDE_INSET) / CELL)
 
 export const FIGURE_SPACE = '\u2007'
 // The token-speed bolt on the desktop, drawn rather than typed. The ⚡ character
@@ -168,13 +186,13 @@ export function minimumLevel(columns: number) {
 type Texts = { weekly: string[]; five: string[]; speed: string; context: string }
 
 // Width of the row at a layout, in cells, tracks at their base — what the drawing
-// below lays out. Measured on the desktop, a cell is about 7.75pt and a pill's
-// border and padding are 15pt a side: its two padding cells, the hairline border
-// taking none, where the terminal's takes a cell each side. Text there is
-// proportional and narrower than its cells (DESKTOP_TEXT). Counting 7 cells of
-// chrome a pill made sizes drop well before they ran out of room.
+// below lays out. A reading has no chrome of its own; between two readings sits
+// a divider, a cell wide counted whole (the desktop's 1px hairline included), with
+// DIVIDER_GAP either side. Measured on the desktop, a cell is about 7.75pt and
+// text there is proportional and narrower than its cells (DESKTOP_TEXT).
 export function rowWidth(L: Layout, t: { weekly: string[]; five: string[]; speed: string; context: string }, isTerminal: boolean) {
-  const chrome = (isTerminal ? 2 : 0) + PILL_PADDING * 2
+  const chrome = 0
+  const divider = 1 + 2 * DIVIDER_GAP[isTerminal ? 'terminal' : 'desktop']
   const gap = 1 // never 0: a terminal would run the texts together
   const k = isTerminal ? 1 : DESKTOP_TEXT
   const textPill = (parts: string[]) => {
@@ -193,8 +211,8 @@ export function rowWidth(L: Layout, t: { weekly: string[]; five: string[]; speed
   const fh = quota(!L.quotaLabels ? '' : L.compactLabels ? '5h' : '5-hour', (t.five[0] ?? '—').padStart(vw), (t.five[1] ?? '').padEnd(rw))
   const sp = L.speed ? textPill([L.bolt ? '⚡' : '', t.speed, L.compactLabels ? 'tok/s' : 'token/s']) : 0
   const cx = L.context ? textPill([L.compactLabels ? 'Ctx' : 'Context', t.context]) : 0
-  const pills = 2 + (L.speed ? 1 : 0) + (L.context ? 1 : 0)
-  return wk + fh + sp + cx + PILL_GAP * (pills - 1)
+  const readings = 2 + (L.speed ? 1 : 0) + (L.context ? 1 : 0)
+  return wk + fh + sp + cx + divider * (readings - 1)
 }
 
 export function fitLevel(columns: number, isTerminal: boolean, t: Texts) {
@@ -443,7 +461,8 @@ export const register: Register = on => {
     // No inset of the row's own: the band's own gap above the pills is the gap
     // at their left and right too (see the row below).
     const INSET = 0
-    const columns = e.props.bodyColumns - INSET * 2
+    const isTerminal = e.surface === 'terminal'
+    const columns = e.props.bodyColumns - INSET * 2 - (isTerminal || !Svg ? 0 : SIDE_CELLS)
 
     const weekly = windowState(u?.weekly ?? null, now)
     const five = windowState(u?.fiveHour ?? null, now)
@@ -456,7 +475,6 @@ export const register: Register = on => {
     //   small    short labels (Wk, 5h, tok/s, Ctx), one countdown unit, ⚡ kept
     //   smallest the reset times, the token-speed pill and the Wk / 5h labels go,
     //            leaving a track and a figure in each quota pill
-    const isTerminal = e.surface === 'terminal'
     const level = fitLevel(columns, isTerminal, {
       weekly: [percentText(weekly.remaining), resetText(weekly.resetsAt, now, false, false), resetText(weekly.resetsAt, now, true)],
       five: [percentText(five.remaining), resetText(five.resetsAt, now), resetText(five.resetsAt, now, true)],
@@ -502,15 +520,16 @@ export const register: Register = on => {
 
     // Desktop: the Codex track, a 4.5px fully rounded bar (.cu-track's shape),
     // filled with the text color, yellow/red by tone, its rest the text color at 10%.
-    // Terminal: a line of cells, the nearest a character grid can draw.
+    // Terminal: a heavy line for what is left over a light one for the rest, the
+    // nearest a character grid can draw.
     const track = (remaining: number | null) => {
       const tone = quotaTone(remaining)
       if (e.surface !== 'terminal' && Svg) {
         // Centered, never stretched to the row's height: the bar stays 4.5px.
         return (
-          // The track takes what its pill has left. Both quota pills are the same
-          // width and hold same-size text slots, so both tracks are always the same
-          // length, growing and shrinking together; nothing is fixed, nothing overflows.
+          // The track takes what its reading has left. Both quota readings grow
+          // alike and hold same-size text, so both tracks are always about the
+          // same length, growing and shrinking together; nothing overflows.
           <Box flexDirection="column" justifyContent="center" alignSelf="center" flexGrow={1} flexShrink={1} minWidth={2}>
             <Svg source={trackSvg(remaining, tone)} alt={remaining == null ? 'unavailable' : `${Math.round(remaining)}% left`} height={TRACK_HEIGHT} />
           </Box>
@@ -519,75 +538,84 @@ export const register: Register = on => {
       const filled = remaining == null ? 0 : Math.round((remaining / 100) * trackWidth)
       return (
         <Text>
-          <Text color={fillColor(tone)}>{'─'.repeat(filled)}</Text>
+          <Text color={fillColor(tone)}>{'━'.repeat(filled)}</Text>
           <Text color="subtle">{'─'.repeat(trackWidth - filled)}</Text>
         </Text>
       )
     }
 
-    // Every pill keeps the same explicit left and right padding at every size.
-    // The two quota pills share the row's spare width equally (grow 1 each) and
-    // give it back equally when it is short; the others hug their content.
-    const pill = (key: string, grow: number, children: any[]) => (
-      <Box key={key} borderStyle="round" borderColor="promptBorder" paddingX={PILL_PADDING} columnGap={1} alignItems="center" flexGrow={grow} justifyContent="flex-start" flexShrink={grow > 0 ? 1 : 0} minWidth={0} overflow="hidden">
+    // A reading: its parts side by side, one cell apart, with no border, padding
+    // or fill of its own. The two quota readings share the row's spare width
+    // equally (grow 1 each) and give it back equally when it is short; the others
+    // hug their content.
+    const reading = (key: string, grow: number, children: any[]) => (
+      <Box key={key} flexDirection="row" columnGap={1} alignItems="center" flexGrow={grow} justifyContent="flex-start" flexShrink={grow > 0 ? 1 : 0} minWidth={0} overflow="hidden">
         {children}
       </Box>
     )
+    const divider = (key: string) => (
+      <Box key={key} flexShrink={0} alignSelf="center">
+        {!isTerminal && Svg
+          ? <Svg source={DIVIDER_SVG} alt="divider" width={1} height={DIVIDER_HEIGHT} />
+          : <Text color="promptBorder">│</Text>}
+      </Box>
+    )
 
-    // Inside a pill the parts sit side by side with the pill's columnGap between
-    // them, one cell (about 7.75pt) and nothing more: the second padding, after
-    // the pill's own padding at its two ends. Each label, figure and countdown used
-    // to sit in a slot as wide as the longer of the two pills' texts, so "5-hour"
-    // in a slot sized for "Weekly", or "2h" in one sized for "15h", left its spare
-    // room inside the gap: from the "y" of Weekly to the track was 35px where the
-    // gap is 14px. Without the slots the gaps are even; the two tracks can differ
-    // by a few points instead, since Weekly is a little wider than 5-hour. The
-    // terminal keeps its figure-space padding, whose cells hold its tracks equal.
-    const fit = (t: string) => (isTerminal ? t : t.replace(/\u2007/g, ''))
+    // Each part sits at its own width, one cell from the next: no slot sized to
+    // the longer of the two readings' texts, which left uneven room in the gaps.
+    // The terminal keeps its figure-space padding, whose cells hold its tracks equal.
+    const fit = (t: string) => (isTerminal ? t : t.replace(/ /g, ''))
     // Each text part is held at its own width (no width given, so it hugs the
-    // text and leaves no slack in the gap). A bare Text in a pill that is short of
-    // room shrinks before the track does and wraps: "15h 0m" broke onto two lines
-    // and the pill doubled in height while its track still had room to spare.
+    // text and leaves no slack in the gap). A bare Text in a reading that is short
+    // of room shrinks before the track does and wraps: "15h 0m" broke onto two
+    // lines and the row doubled in height while its track still had room to spare.
     const part = (child: any) => <Box flexShrink={0}>{child}</Box>
-    const quotaPill = (key: string, p: typeof wk, w: ReturnType<typeof windowState>) =>
-      pill(key, 1, [
+    // The figure keeps the app's own type; it takes its track's colour when the
+    // quota runs low.
+    const figure = (text: string, tone: Tone) =>
+      part(<Text color={tone === 'normal' ? undefined : fillColor(tone)}>{fit(text)}</Text>)
+    const quotaReading = (key: string, p: typeof wk, w: ReturnType<typeof windowState>) =>
+      reading(key, 1, [
         ...(p.label ? [part(<Text color="inactive">{fit(p.label)}</Text>)] : []),
         track(w.remaining),
-        part(<Text>{fit(p.value)}</Text>),
+        figure(p.value, quotaTone(w.remaining)),
         ...(p.reset == null ? [] : [part(<Text color="inactive">{fit(p.reset)}</Text>)]),
       ])
 
+    const readings = [
+      quotaReading('weekly', wk, weekly),
+      quotaReading('five-hour', fh, five),
+      L.speed
+        ? reading('speed', 0, [
+            ...(showBolt
+              ? [!isTerminal && Svg
+                  ? <Svg source={BOLT_SVG} alt="token speed" width={BOLT_WIDTH} height={BOLT_HEIGHT} />
+                  : <Text color="inactive">⚡</Text>]
+              : []),
+            <Text>{speedValue}</Text>,
+            <Text color="inactive">{speedUnit}</Text>,
+          ])
+        : null,
+      L.context
+        ? reading('context', 0, [
+            <Text color="inactive">{ctxLabel}</Text>,
+            figure(percentText(context), contextTone(context)),
+          ])
+        : null,
+    ].filter(Boolean)
+
     const bar = (
-      // The gap from the band's edge to the pills is the same at the left and right
-      // as above them: on the desktop a blank SIDE_INSET-wide drawing at each end
-      // makes up the difference (a whole cell was too much, none too little). The
-      // pills sit in an inner row so PILL_GAP falls only between pills, never
-      // between a pill and a spacer. Spacing is in plain cells (older Claude Code
-      // builds refuse named steps).
-      // Nothing here sets a height or a font size: each pill stays one text row
-      // in the app's own type, exactly as before.
+      // The readings sit in an inner row with a divider between each two,
+      // DIVIDER_GAP cells of space either side of it; on the desktop a blank
+      // SIDE_INSET-wide drawing at each end gives the first and last reading the
+      // same space to the band's edge. The gaps inside a reading stay one cell.
+      // Spacing is in plain cells (older Claude Code builds refuse named steps).
+      // Nothing here sets a height or a font size: the row stays one text row in
+      // the app's own type.
       <Box flexDirection="row" flexWrap="nowrap" marginX={INSET} marginY={0} overflow="hidden">
       {sideSpacer('left')}
-      <Box flexDirection="row" columnGap={PILL_GAP} flexWrap="nowrap" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
-        {quotaPill('weekly', wk, weekly)}
-        {quotaPill('five-hour', fh, five)}
-        {L.speed
-          ? pill('speed', 0, [
-              ...(showBolt
-                ? [!isTerminal && Svg
-                    ? <Svg source={BOLT_SVG} alt="token speed" width={BOLT_WIDTH} height={BOLT_HEIGHT} />
-                    : <Text color="inactive">⚡</Text>]
-                : []),
-              <Text>{speedValue}</Text>,
-              <Text color="inactive">{speedUnit}</Text>,
-            ])
-          : null}
-        {L.context
-          ? pill('context', 0, [
-              <Text color="inactive">{ctxLabel}</Text>,
-              <Text>{percentText(context)}</Text>,
-            ])
-          : null}
+      <Box flexDirection="row" columnGap={DIVIDER_GAP[isTerminal ? 'terminal' : 'desktop']} alignItems="center" flexWrap="nowrap" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+        {readings.flatMap((r, i) => (i === 0 ? [r] : [divider(`divider-${i}`), r]))}
       </Box>
       {sideSpacer('right')}
       </Box>

@@ -1,6 +1,6 @@
 import { test, expect, mock } from 'claude-code/testing'
 
-import { resetText, quotaTone, trackSvg, fitLevel, layoutFor, rowWidth, LEVELS, TRACK_HEIGHT, SIDE_INSET } from '../hooks/register'
+import { resetText, quotaTone, contextTone, trackSvg, fitLevel, layoutFor, rowWidth, LEVELS, TRACK_HEIGHT, SIDE_INSET } from '../hooks/register'
 import { shown, exactly, like } from './shown'
 
 const props = (bodyColumns: number) => ({
@@ -77,9 +77,9 @@ for (const surface of ['terminal', 'desktop'] as const) {
   })
 }
 
-// The pills are Boxes of Text on both surfaces; on the desktop each quota pill's
-// track is a small SVG of its own, 4.5px tall with fully rounded ends.
-test('desktop draws a rounded 4.5px track in each quota pill', async ($, on) => {
+// On the desktop each quota reading's track is a small SVG of its own, 4.5px
+// tall with fully rounded ends.
+test('desktop draws a rounded 4.5px track in each quota reading', async ($, on) => {
   mock.clock(on, { now: Date.now() })
   on('session.measure', (_$, e) => ({ changed: e.changed }))
   await $.session.measure({
@@ -207,33 +207,64 @@ test('the smaller size drops the token-speed pill but keeps Context', async ($, 
   expect((await ui.findAll({ type: 'Text', text: /^Ctx$/ })).length).toBe(1)
 })
 
-// Equal padding on both sides of a pill, and the second padding between parts:
-// the countdown is the pill's last part and the label its first, each a bare Text
-// right against the pill's own padding, with only the pill's one-cell gap between
-// neighbours. A short countdown ("2h" beside "15h") therefore leaves no extra room
-// on the right of its pill, and a short label none before its track.
-test('parts sit right against the pill padding, a one-cell gap between them', async ($, on) => {
+// No container: no reading has a border, padding or fill of its own. A divider
+// sits between each two readings (three with all four shown), and inside a
+// reading the parts are one cell apart with no fixed-width slot around any.
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`${surface}: readings sit in one open row, a divider between each two`, async ($, on) => {
+    mock.clock(on, { now: Date.now() })
+    on('session.measure', (_$, e) => ({ changed: e.changed }))
+    await $.session.measure({
+      context: { tokens: 10, window: 100, percent: 10 },
+      rateLimits: [
+        { kind: 'seven_day', percentUsed: 5, resetsAt: inHours(15.2) },
+        { kind: 'five_hour', percentUsed: 15, resetsAt: inHours(2.1) },
+      ],
+      changed: ['context', 'rateLimits'],
+    })
+    const ui = await $.ui.mount({ plugin: 'usage-bar', surface, component: 'AbovePrompt', props: props(140) })
+    const boxes = await ui.findAll({ type: 'Box' })
+    expect(boxes.filter((b: any) => b.props.borderStyle !== undefined).length).toBe(0)
+    expect(boxes.filter((b: any) => b.props.backgroundColor !== undefined).length).toBe(0)
+    const dividers = surface === 'desktop'
+      ? (await ui.findAll({ type: 'Svg' })).filter((s: any) => s.props.alt === 'divider')
+      : (await ui.findAll({ type: 'Text' })).filter((t: any) => t.text === '│')
+    expect(dividers.length).toBe(3)
+    for (const key of ['weekly', 'five-hour', 'speed', 'context']) {
+      const [r] = boxes.filter((b: any) => b.key === key || b.props.key === key)
+      expect(r!.props.columnGap).toBe(1)
+      expect(r!.props.paddingX).toBeUndefined()
+    }
+  })
+}
+
+test('one fewer divider for each reading a narrow row gives up', async ($, on) => {
+  mock.clock(on, { now: Date.now() })
+  const ui = await $.ui.mount({ plugin: 'usage-bar', surface: 'terminal', component: 'AbovePrompt', props: props(46) })
+  expect((await ui.findAll({ type: 'Text' })).filter((t: any) => t.text === '│').length).toBe(2)
+})
+
+test('a low quota colours its figure as well as its track; Context warns as it fills', async ($, on) => {
   mock.clock(on, { now: Date.now() })
   on('session.measure', (_$, e) => ({ changed: e.changed }))
   await $.session.measure({
-    context: { tokens: 10, window: 100, percent: 10 },
+    context: { tokens: 85, window: 100, percent: 85 },
     rateLimits: [
-      { kind: 'seven_day', percentUsed: 5, resetsAt: inHours(15.2) },
-      { kind: 'five_hour', percentUsed: 15, resetsAt: inHours(2.1) },
+      { kind: 'seven_day', percentUsed: 30, resetsAt: inHours(50) },
+      { kind: 'five_hour', percentUsed: 95, resetsAt: inHours(1) },
     ],
     changed: ['context', 'rateLimits'],
   })
-  const ui = await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(140) })
-  const pills = (await ui.findAll({ type: 'Box' })).filter((b: any) => b.props.borderStyle === 'round')
-  expect(pills.length).toBe(4)
-  for (const pill of pills) {
-    expect(pill.props.paddingX).toBe(2)
-    expect(pill.props.columnGap).toBe(1)
-    // every part is a direct child: a Text, the bolt, or a track — never a slot
-    for (const child of pill.children as any[]) {
-      if (child && typeof child === 'object' && child.type === 'Box') expect(child.props.width).toBeUndefined()
-    }
-  }
+  const ui = await $.ui.mount({ plugin: 'usage-bar', surface: 'terminal', component: 'AbovePrompt', props: props(140) })
+  const [low] = await ui.findAll({ type: 'Text', text: /^\u2007?5%$/ })
+  expect(low!.props.color).toBe('error')
+  const [fine] = await ui.findAll({ type: 'Text', text: /^70%$/ })
+  expect(fine!.props.color).toBeUndefined()
+  const [ctx] = await ui.findAll({ type: 'Text', text: /^85%$/ })
+  expect(ctx!.props.color).toBe('warning')
+  expect(contextTone(80)).toBe('warning')
+  expect(contextTone(90)).toBe('low')
+  expect(contextTone(79)).toBe('normal')
 })
 
 // The desktop's bolt is a drawing, whose ink starts exactly at the pill's padding;
@@ -248,8 +279,8 @@ test('desktop draws the bolt as an SVG; the terminal keeps the ⚡ character', a
   expect(exactly(await shown(term), '⚡')).toBe(1)
 })
 
-// The smallest size: a chat as narrow as about 28 columns. Context goes so that
-// both quota figures fit whole instead of being cut at their pills' right edge.
+// The smallest size: a chat as narrow as about 26 columns. Context goes so that
+// both quota figures fit whole instead of being cut at the row's right edge.
 for (const surface of ['terminal', 'desktop'] as const) {
   test(`${surface}: the narrowest chat drops Context and keeps both figures whole`, async ($, on) => {
     mock.clock(on, { now: Date.now() })
@@ -262,7 +293,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
       ],
       changed: ['context', 'rateLimits'],
     })
-    const ui = await $.ui.mount({ plugin: 'usage-bar', surface, component: 'AbovePrompt', props: props(30) })
+    const ui = await $.ui.mount({ plugin: 'usage-bar', surface, component: 'AbovePrompt', props: props(26) })
     const words = await shown(ui)
     expect(exactly(words, 'Ctx') + exactly(words, '8%')).toBe(0)
     expect(exactly(words, '94%')).toBe(1)
