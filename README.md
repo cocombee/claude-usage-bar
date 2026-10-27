@@ -31,8 +31,8 @@ any of them; in a terminal that is a single line. Tracks and their figures turn 
 | --- | --- | --- |
 | XXL | 642pt | `Weekly ━━ 85% 5d 21h │ 5-hour ━━ 99% 4h 28m │ ⚡ ~89 token/s │ Context 33%` |
 | XL | 543pt | `Wk ━━ 85% 5d 21h │ 5h ━━ 99% 4h 28m │ ⚡ ~89 tok/s │ Ctx 33%` |
-| L | 459pt | `Wk ━━ 85% 5d │ 5h ━━ 99% 4h │ ⚡ ~89 t/s │ Ctx 33%` |
-| M | 411pt | `Wk ◔ 85% │ 5h ◔ 99% │ ⚡ ~89 t/s │ Ctx 33%` |
+| L | 459pt | `Wk ━━ 85% 5d │ 5h ━━ 99% 4h │ ⚡ ~89 tok/s │ Ctx 33%` |
+| M | 410pt | `Wk ◔ 85% │ 5h ◔ 99% │ ⚡ ~89 t/s │ Ctx 33%` |
 | S | where it fits | `Wk ◔ 85% │ 5h ◔ 99% │ Ctx 33%` |
 | XS | where it fits | `Wk ◔ 85% │ 5h ◔ 99%` |
 | XXS | below that | `◔ 85% │ ◔ 99%` |

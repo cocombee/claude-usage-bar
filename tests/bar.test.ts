@@ -52,14 +52,14 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(exactly(words, 'Ctx')).toBe(1)
   })
 
-  test(`${surface}: the smaller size still keeps the Wk and 5h labels`, async ($, on) => {
+  test(`${surface}: L keeps the Wk and 5h labels, with token speed as tok/s`, async ($, on) => {
     mock.clock(on, { now: Date.now() })
-    // 55: the smaller size on both surfaces with no data yet (desktop 35–63, terminal 41–63)
-    const ui = await $.ui.mount({ plugin: 'usage-bar', surface, component: 'AbovePrompt', props: props(55) })
+    // 55 bar columns is size L; the desktop's side spacers take 3 more of the band
+    const ui = await $.ui.mount({ plugin: 'usage-bar', surface, component: 'AbovePrompt', props: props(surface === 'desktop' ? 58 : 55) })
     const words = await shown(ui)
     expect(exactly(words, 'Wk')).toBe(1)
     expect(exactly(words, '5h')).toBe(1)
-    expect(exactly(words, 't/s')).toBe(1)
+    expect(exactly(words, 'tok/s')).toBe(1)
   })
 
   test(`${surface}: the narrow size drops Ctx but keeps the Wk and 5h labels`, async ($, on) => {
@@ -135,7 +135,7 @@ test('sizes step down in order, fullest that fits', () => {
   const xl = layoutFor(1)
   expect(xl.shortLabels && xl.reset && !xl.compactReset && xl.speedUnit === 'tok/s' && !xl.ring).toBe(true)
   const l = layoutFor(2)
-  expect(l.compactReset && l.speedUnit === 't/s' && !l.ring).toBe(true)
+  expect(l.compactReset && l.speedUnit === 'tok/s' && !l.ring).toBe(true)
   expect(fitLevel(widthAt(LEVELS - 1), true, texts)).toBe(LEVELS - 1)
 })
 
@@ -150,7 +150,7 @@ test('seven sizes, each giving up the next thing', () => {
   expect(ladder.map(L => L.reset)).toEqual([true, true, true, false, false, false, false])
   expect(ladder.map(L => L.compactReset)).toEqual([false, false, true, false, false, false, false])
   expect(ladder.map(L => L.speed)).toEqual([true, true, true, true, false, false, false])
-  expect(ladder.slice(0, 4).map(L => L.speedUnit)).toEqual(['token/s', 'tok/s', 't/s', 't/s'])
+  expect(ladder.slice(0, 4).map(L => L.speedUnit)).toEqual(['token/s', 'tok/s', 'tok/s', 't/s'])
   expect(ladder.map(L => L.context)).toEqual([true, true, true, true, true, false, false])
   expect(ladder.slice(0, 5).map(L => L.contextLabel)).toEqual(['Context', 'Ctx', 'Ctx', 'Ctx', 'Ctx'])
   expect(ladder.map(L => L.quotaLabels)).toEqual([true, true, true, true, true, true, false])
@@ -216,11 +216,10 @@ test('quota readings show their figures with no padding in the text, parts space
   expect(sized.length).toBe(0)
 })
 
-test('the smaller size keeps token speed as t/s and Context', async ($, on) => {
+test('L keeps token speed as tok/s and Context', async ($, on) => {
   mock.clock(on, { now: Date.now() })
   const ui = await $.ui.mount({ plugin: 'usage-bar', surface: 'terminal', component: 'AbovePrompt', props: props(55) })
-  expect((await ui.findAll({ type: 'Text', text: /^t\/s$/ })).length).toBe(1)
-  expect((await ui.findAll({ type: 'Text', text: /tok/ })).length).toBe(0)
+  expect((await ui.findAll({ type: 'Text', text: /^tok\/s$/ })).length).toBe(1)
   expect((await ui.findAll({ type: 'Text', text: /^Ctx$/ })).length).toBe(1)
 })
 

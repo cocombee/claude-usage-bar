@@ -160,12 +160,12 @@ type Size = {
 // Widest first. A size is used from its breakpoint until a wider one takes over,
 // and only where its content fits; otherwise the next one down is tried. The
 // breakpoints were designed as desktop band widths and converted with
-// floor((pt - 14) / CELL) - SIDE_CELLS: 642pt, 543pt, 459pt and 411pt. Wk / 5h
+// floor((pt - 14) / CELL) - SIDE_CELLS: 642pt, 543pt, 459pt and 410pt. Wk / 5h
 // outlast Context, as an unlabelled figure is the harder thing to read.
 const SIZES: readonly Size[] = [
   { name: 'XXL', from: 78, labels: 'full', meter: 'bar', countdown: 'full', speed: 'token/s', context: 'Context' },
   { name: 'XL', from: 65, labels: 'short', meter: 'bar', countdown: 'full', speed: 'tok/s', context: 'Ctx' },
-  { name: 'L', from: 54, labels: 'short', meter: 'bar', countdown: 'short', speed: 't/s', context: 'Ctx' },
+  { name: 'L', from: 54, labels: 'short', meter: 'bar', countdown: 'short', speed: 'tok/s', context: 'Ctx' },
   { name: 'M', from: 48, labels: 'short', meter: 'ring', countdown: null, speed: 't/s', context: 'Ctx' },
   { name: 'S', from: 0, labels: 'short', meter: 'ring', countdown: null, speed: null, context: 'Ctx' },
   { name: 'XS', from: 0, labels: 'short', meter: 'ring', countdown: null, speed: null, context: null },
