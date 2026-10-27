@@ -1,6 +1,6 @@
 import { test, expect, mock } from 'claude-code/testing'
 
-import { resetText, quotaTone, contextTone, trackSvg, fitLevel, layoutFor, rowWidth, LEVELS, TRACK_HEIGHT, SIDE_INSET } from '../hooks/register'
+import { resetText, quotaTone, contextTone, ringSvg, RING_SIZE, RING_STROKE, trackSvg, fitLevel, layoutFor, rowWidth, LEVELS, TRACK_HEIGHT, SIDE_INSET } from '../hooks/register'
 import { shown, exactly, like } from './shown'
 
 const props = (bodyColumns: number) => ({
@@ -59,7 +59,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const words = await shown(ui)
     expect(exactly(words, 'Wk')).toBe(1)
     expect(exactly(words, '5h')).toBe(1)
-    expect(like(words, /tok/)).toBe(0)
+    expect(exactly(words, 't/s')).toBe(1)
   })
 
   test(`${surface}: the narrow size drops Ctx but keeps the Wk and 5h labels`, async ($, on) => {
@@ -77,9 +77,9 @@ for (const surface of ['terminal', 'desktop'] as const) {
   })
 }
 
-// On the desktop each quota reading's track is a small SVG of its own, 4.5px
+// On the desktop each quota reading's track is a small SVG of its own, 3px
 // tall with fully rounded ends.
-test('desktop draws a rounded 4.5px track in each quota reading', async ($, on) => {
+test('desktop draws a rounded 3px track in each quota reading', async ($, on) => {
   mock.clock(on, { now: Date.now() })
   on('session.measure', (_$, e) => ({ changed: e.changed }))
   await $.session.measure({
@@ -96,8 +96,8 @@ test('desktop draws a rounded 4.5px track in each quota reading', async ($, on) 
 
 test('track svg geometry', () => {
   const svg = trackSvg(15, 'warning')
-  expect(svg.includes('height="4.5"')).toBe(true)
-  expect(svg.includes('rx="2.25"')).toBe(true)
+  expect(svg.includes('height="3"')).toBe(true)
+  expect(svg.includes('rx="1.5"')).toBe(true)
   expect(svg.includes('width="15%"')).toBe(true)
   expect(svg.includes('#e3b341')).toBe(true)
 })
@@ -132,27 +132,43 @@ test('sizes step down in order, fullest that fits', () => {
     expect(level >= previous).toBe(true)
     previous = level
   }
-  const small = layoutFor(1)
-  expect(small.compactLabels && small.compactReset && small.bolt && small.reset && small.speed).toBe(true)
-  const smaller = layoutFor(2)
-  expect(smaller.reset || smaller.speed).toBe(false)
+  const xl = layoutFor(1)
+  expect(xl.shortLabels && xl.reset && !xl.compactReset && xl.speedUnit === 'tok/s' && !xl.ring).toBe(true)
+  const l = layoutFor(2)
+  expect(l.compactReset && l.speedUnit === 't/s' && !l.ring).toBe(true)
   expect(fitLevel(widthAt(LEVELS - 1), true, texts)).toBe(LEVELS - 1)
 })
 
-// Five sizes. Small shortens the labels and countdowns; smaller gives up the reset
-// times and the token-speed pill; narrow Context; smallest the Wk / 5h labels.
-test('five sizes, each giving up the next thing', () => {
-  expect(LEVELS).toBe(5)
+// Seven sizes, as designed in the live breakpoint page: each from its breakpoint
+// (in bar columns) where its content fits, giving things up widest to narrowest.
+test('seven sizes, each giving up the next thing', () => {
+  expect(LEVELS).toBe(7)
   const ladder = Array.from({ length: LEVELS }, (_, i) => layoutFor(i))
-  expect(ladder.map(L => L.reset)).toEqual([true, true, false, false, false])
-  expect(ladder.map(L => L.speed)).toEqual([true, true, false, false, false])
-  expect(ladder.map(L => L.quotaLabels)).toEqual([true, true, true, true, false])
-  expect(ladder.map(L => L.context)).toEqual([true, true, true, false, false])
-  expect(ladder.map(L => L.compactLabels)).toEqual([false, true, true, true, true])
+  expect(ladder.map(L => L.name)).toEqual(['XXL', 'XL', 'L', 'M', 'S', 'XS', 'XXS'])
+  expect(ladder.map(L => L.minColumns)).toEqual([78, 65, 54, 48, 0, 0, 0])
+  expect(ladder.map(L => L.ring)).toEqual([false, false, false, true, true, true, true])
+  expect(ladder.map(L => L.reset)).toEqual([true, true, true, false, false, false, false])
+  expect(ladder.map(L => L.compactReset)).toEqual([false, false, true, false, false, false, false])
+  expect(ladder.map(L => L.speed)).toEqual([true, true, true, true, false, false, false])
+  expect(ladder.slice(0, 4).map(L => L.speedUnit)).toEqual(['token/s', 'tok/s', 't/s', 't/s'])
+  expect(ladder.map(L => L.context)).toEqual([true, true, true, true, true, false, false])
+  expect(ladder.slice(0, 5).map(L => L.contextLabel)).toEqual(['Context', 'Ctx', 'Ctx', 'Ctx', 'Ctx'])
+  expect(ladder.map(L => L.quotaLabels)).toEqual([true, true, true, true, true, true, false])
+  expect(ladder.map(L => L.shortLabels)).toEqual([false, true, true, true, true, true, false])
   // nothing is ever given up and then taken back lower down
   for (const key of ['reset', 'speed', 'quotaLabels', 'context'] as const) {
     const kept = ladder.map(L => L[key])
     expect(kept.slice(1).every((v, i) => !(v && !kept[i]))).toBe(true)
+  }
+})
+
+test('each size waits for its breakpoint even where it would fit', () => {
+  const none = { weekly: ['—', '—', '—'], five: ['—', '—', '—'], speed: '—', context: '—' }
+  for (const isTerminal of [true, false]) {
+    expect(fitLevel(78, isTerminal, none)).toBe(0)
+    expect(fitLevel(77, isTerminal, none)).toBe(1)
+    expect(fitLevel(65, isTerminal, none)).toBe(1)
+    expect(fitLevel(64, isTerminal, none)).toBe(2)
   }
 })
 
@@ -177,7 +193,7 @@ test('every chosen layout fits its row, down to the smallest', () => {
   }
 })
 
-test('quota pills show their figures with no padding in the text, parts spaced by the gap', async ($, on) => {
+test('quota readings show their figures with no padding in the text, parts spaced by the gap', async ($, on) => {
     mock.clock(on, { now: Date.now() })
   on('session.measure', (_$, e) => ({ changed: e.changed }))
   await $.session.measure({
@@ -194,17 +210,59 @@ test('quota pills show their figures with no padding in the text, parts spaced b
   // values sit in same-size slots, so the text itself carries no padding
   expect(exactly(words, '8%')).toBe(1)
   expect(exactly(words, '30m')).toBe(1)
-  // the parts sit straight in the pill, spaced by its one-cell gap alone: no
+  // the parts sit straight in the reading, spaced by its one-cell gap alone: no
   // fixed-width box around any of them to leave spare room in that gap
   const sized = (await ui.findAll({ type: 'Box' })).filter((b: any) => typeof b.props.width === 'number')
   expect(sized.length).toBe(0)
 })
 
-test('the smaller size drops the token-speed pill but keeps Context', async ($, on) => {
-    mock.clock(on, { now: Date.now() })
-  const ui = await $.ui.mount({ plugin: 'usage-bar', surface: 'terminal', component: 'AbovePrompt', props: props(46) })
+test('the smaller size keeps token speed as t/s and Context', async ($, on) => {
+  mock.clock(on, { now: Date.now() })
+  const ui = await $.ui.mount({ plugin: 'usage-bar', surface: 'terminal', component: 'AbovePrompt', props: props(55) })
+  expect((await ui.findAll({ type: 'Text', text: /^t\/s$/ })).length).toBe(1)
   expect((await ui.findAll({ type: 'Text', text: /tok/ })).length).toBe(0)
   expect((await ui.findAll({ type: 'Text', text: /^Ctx$/ })).length).toBe(1)
+})
+
+// M and below draw a 13px ring with a 2px line for each quota on the desktop,
+// coloured as the track; XXL, XL and L keep tracks, as does the terminal.
+test('desktop draws rings from M down, tracks above and on the terminal', async ($, on) => {
+  mock.clock(on, { now: Date.now() })
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  await $.session.measure({
+    context: { tokens: 10, window: 100, percent: 10 },
+    rateLimits: [
+      { kind: 'seven_day', percentUsed: 85, resetsAt: inHours(50) },
+      { kind: 'five_hour', percentUsed: 95, resetsAt: inHours(1) },
+    ],
+    changed: ['context', 'rateLimits'],
+  })
+  const t = { weekly: ['15%', '2d 2h', '2d'], five: ['5%', '1h 0m', '1h'], speed: '—', context: '10%' }
+  for (let level = 0; level < LEVELS; level++) {
+    let columns = 160
+    while (columns > 0 && fitLevel(columns, false, t) !== level) columns--
+    expect(columns > 0).toBe(true)
+    // the desktop's own side spacers are three cells of the band's columns
+    const ui = await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(columns + 3) })
+    const rings = (await ui.findAll({ type: 'Svg' })).map((s: any) => String(s.props.source)).filter(src => src.includes('<circle'))
+    expect(rings.length).toBe(layoutFor(level).ring ? 2 : 0)
+    if (rings.length) {
+      expect(rings.every(r => r.includes(`width="${RING_SIZE}"`) && r.includes(`stroke-width="${RING_STROKE}"`))).toBe(true)
+      expect(rings.some(r => r.includes('#e3b341'))).toBe(true)
+      expect(rings.some(r => r.includes('#e54d4d'))).toBe(true)
+    }
+  }
+  const term = await $.ui.mount({ plugin: 'usage-bar', surface: 'terminal', component: 'AbovePrompt', props: props(40) })
+  expect((await term.findAll({ type: 'Svg' })).length).toBe(0)
+})
+
+test('ring svg geometry', () => {
+  const full = ringSvg(100, 'normal')
+  expect(full.includes('r="5.5"')).toBe(true)
+  expect(full.includes('stroke-dasharray="34.56 34.56"')).toBe(true)
+  expect(ringSvg(0, 'normal').includes('stroke-dasharray')).toBe(false)
+  expect(ringSvg(null, 'normal').includes('stroke-dasharray')).toBe(false)
+  expect(ringSvg(5, 'low').includes('#e54d4d')).toBe(true)
 })
 
 // No container: no reading has a border, padding or fill of its own. A divider
@@ -238,10 +296,29 @@ for (const surface of ['terminal', 'desktop'] as const) {
   })
 }
 
+test('S gives up token speed but keeps Context', async ($, on) => {
+  mock.clock(on, { now: Date.now() })
+  const none = { weekly: ['—', '—', '—'], five: ['—', '—', '—'], speed: '—', context: '—' }
+  for (const isTerminal of [true, false]) {
+    let columns = 160
+    while (columns > 0 && fitLevel(columns, isTerminal, none) !== 4) columns--
+    expect(columns > 0).toBe(true)
+    const ui = await $.ui.mount({ plugin: 'usage-bar', surface: isTerminal ? 'terminal' : 'desktop', component: 'AbovePrompt', props: props(columns) })
+    const words = await shown(ui)
+    expect(exactly(words, 'Ctx')).toBe(1)
+    expect(exactly(words, 't/s')).toBe(0)
+    expect(exactly(words, 'Wk')).toBe(1)
+  }
+})
+
 test('one fewer divider for each reading a narrow row gives up', async ($, on) => {
   mock.clock(on, { now: Date.now() })
-  const ui = await $.ui.mount({ plugin: 'usage-bar', surface: 'terminal', component: 'AbovePrompt', props: props(46) })
-  expect((await ui.findAll({ type: 'Text' })).filter((t: any) => t.text === '│').length).toBe(2)
+  // the narrow size: no token speed and no Context, so one divider is left
+  const none = { weekly: ['—', '—', '—'], five: ['—', '—', '—'], speed: '—', context: '—' }
+  let columns = 160
+  while (columns > 0 && fitLevel(columns, true, none) !== LEVELS - 2) columns--
+  const ui = await $.ui.mount({ plugin: 'usage-bar', surface: 'terminal', component: 'AbovePrompt', props: props(columns) })
+  expect((await ui.findAll({ type: 'Text' })).filter((t: any) => t.text === '│').length).toBe(1)
 })
 
 test('a low quota colours its figure as well as its track; Context warns as it fills', async ($, on) => {
@@ -267,8 +344,8 @@ test('a low quota colours its figure as well as its track; Context warns as it f
   expect(contextTone(79)).toBe('normal')
 })
 
-// The desktop's bolt is a drawing, whose ink starts exactly at the pill's padding;
-// the ⚡ emoji's own side bearings made that pill's left side 3px wider than its right.
+// The desktop's bolt is a drawing, whose ink starts exactly at the reading's edge;
+// the ⚡ emoji's own side bearings set its ink 3px further in than any other reading's text.
 test('desktop draws the bolt as an SVG; the terminal keeps the ⚡ character', async ($, on) => {
   mock.clock(on, { now: Date.now() })
   const desk = await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(140) })
@@ -301,8 +378,8 @@ for (const surface of ['terminal', 'desktop'] as const) {
   })
 }
 
-// The countdowns hold their own width: a squeezed pill shortens its track, and its
-// text never wraps onto a second line, which doubled the pill's height.
+// The countdowns hold their own width: a squeezed reading shortens its track, and its
+// text never wraps onto a second line, which doubled the row's height.
 test('quota text never shrinks, so it never wraps; Weekly shows no minutes', async ($, on) => {
   // one fixed moment for the clock and the reset times alike: reading Date.now()
   // twice let a few milliseconds turn "1h 40m" into "1h 41m" now and then
@@ -325,12 +402,12 @@ test('quota text never shrinks, so it never wraps; Weekly shows no minutes', asy
   expect(exactly(words, '1h 40m')).toBe(1)
   for (const text of ['Weekly', '94%', '15h', '5-hour', '80%', '1h 40m']) {
     const [holder] = await ui.findAll({ type: 'Box', text: new RegExp(`^${text}$`) })
-    expect(holder.props.flexShrink).toBe(0)
+    expect(holder!.props.flexShrink).toBe(0)
   }
 })
 
 // The row's sides: a SIDE_INSET-wide spacer at each end on the desktop, so the
-// gap at the pills' left and right matches the band's gap above them.
+// first and last reading sit one divider gap from the band's edge.
 test('desktop pads both ends of the row with a drawn spacer; the terminal does not', async ($, on) => {
   mock.clock(on, { now: 0 })
   const props = { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 160, scroll: { offset: 0, bodyRows: 20 }, view: {} }

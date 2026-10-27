@@ -25,7 +25,19 @@ shows how much of the window is used. So a good day is a high Weekly and a low C
 
 The four readings sit in one open row with a thin divider between each, no box around
 any of them; in a terminal that is a single line. Tracks and their figures turn yellow at
-20% left or less and red at 10% or less; Context's figure does the same at 80% and 90% used. Missing data shows `—`, never a made-up zero. Narrow windows shorten labels (Wk, 5h, Ctx, tok/s) so the bar stays one row. Usage limits appear on Claude subscription plans; elsewhere those readings show `—`.
+20% left or less and red at 10% or less; Context's figure does the same at 80% and 90% used. Missing data shows `—`, never a made-up zero. The bar has seven sizes, widest to narrowest, so it always stays one row:
+
+| Size | From (desktop) | Shows |
+| --- | --- | --- |
+| XXL | 642pt | `Weekly ━━ 85% 5d 21h │ 5-hour ━━ 99% 4h 28m │ ⚡ ~89 token/s │ Context 33%` |
+| XL | 543pt | `Wk ━━ 85% 5d 21h │ 5h ━━ 99% 4h 28m │ ⚡ ~89 tok/s │ Ctx 33%` |
+| L | 459pt | `Wk ━━ 85% 5d │ 5h ━━ 99% 4h │ ⚡ ~89 t/s │ Ctx 33%` |
+| M | 411pt | `Wk ◔ 85% │ 5h ◔ 99% │ ⚡ ~89 t/s │ Ctx 33%` |
+| S | where it fits | `Wk ◔ 85% │ 5h ◔ 99% │ Ctx 33%` |
+| XS | where it fits | `Wk ◔ 85% │ 5h ◔ 99%` |
+| XXS | below that | `◔ 85% │ ◔ 99%` |
+
+A size is used from its breakpoint up to the next bigger size's, and only where its content fits with the bar's padding. On the desktop, M and below draw each quota as a small ring; the terminal draws tracks at every size. Usage limits appear on Claude subscription plans; elsewhere those readings show `—`.
 
 ## Install
 

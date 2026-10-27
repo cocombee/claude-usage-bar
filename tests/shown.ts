@@ -1,6 +1,6 @@
 // What the bar shows, whichever surface drew it.
 //
-// Both surfaces draw the pills as Boxes of Text, so the words are Text nodes; the
+// Both surfaces draw the readings as Boxes of Text, so the words are Text nodes; the
 // desktop's tracks are small SVGs with no words in them. Words drawn inside an
 // Svg's source (`<text>` nodes) are read too, so a drawing that moves text into an
 // SVG is still seen rather than quietly read as empty.
@@ -15,7 +15,7 @@ export async function shown(ui: any): Promise<string[]> {
   const svgs = await ui.findAll({ type: 'Svg' })
   const drawn = svgs.flatMap((svg: any) =>
     [...String(svg.props?.source ?? '').matchAll(/<text\b[^>]*>([\s\S]*?)<\/text>/g)]
-      .map(m => unescape(m[1])),
+      .map(m => unescape(m[1] ?? '')),
   )
   const typed = (await ui.findAll({ type: 'Text' })).map((t: any) => String(t.text ?? ''))
   return [...drawn, ...typed].map(s => s.replace(FIGURE_SPACE, '')).filter(s => s !== '')

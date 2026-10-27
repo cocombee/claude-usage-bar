@@ -72,60 +72,54 @@ function windowState(w: Window | null, now: number) {
   return { remaining, resetsAt: Number.isFinite(resetsAt) ? resetsAt : null }
 }
 
-// The track: 4.5px tall (the user's pick over the original's 5.6px), fully rounded; fill = text color,
-// warning #e3b341, low #e54d4d; the empty part is the text color at 10%.
-export const TRACK_HEIGHT = 4.5
-// Cells of space either side of a divider: one on the terminal, where a cell is
-// a whole character, two on the desktop, whose cells are narrow.
-export const DIVIDER_GAP = { terminal: 1, desktop: 2 } as const
-// The width of a desktop cell, in points, measured off the desktop.
+// Track: 3px, fully rounded; the text colour (yellow or red by tone) over the
+// text colour at 10%.
+export const TRACK_HEIGHT = 3
+// The least cells a track takes for a size to count as fitting; it then grows
+// into whatever the row has spare.
+const TRACK_BASE = 2
+// Drawings cannot name theme keys, so the tones are spelled out for them.
+const TONE_HEX: Record<Tone, string | null> = { normal: null, warning: '#e3b341', low: '#e54d4d' }
+
+// A desktop cell in points, and the share of a cell one character of the
+// desktop's proportional text takes ("Ctx" measures 18pt, "8%" 16pt).
 const CELL = 7.75
-// The divider: the terminal's │ in the prompt box's border colour; on the desktop
-// a 1px hairline as tall as the text's capitals, the text colour at 18% (an
-// SVG cannot name a theme key), so it reads as a rule rather than a glyph.
+export const DESKTOP_TEXT = 0.85
+
+// Cells either side of a divider: one terminal character, two desktop cells.
+export const DIVIDER_GAP = { terminal: 1, desktop: 2 } as const
+// Desktop divider: a 1px hairline in the text colour at 18%. The terminal draws
+// │ in the prompt border's colour.
 export const DIVIDER_HEIGHT = 12
 export const DIVIDER_SVG =
   `<svg xmlns="http://www.w3.org/2000/svg" width="1" height="${DIVIDER_HEIGHT}" viewBox="0 0 1 ${DIVIDER_HEIGHT}">` +
   `<style>.d{fill:#0b0b0b;opacity:.18}@media(prefers-color-scheme:dark){.d{fill:#eeeeee}}</style>` +
   `<rect class="d" width="1" height="${DIVIDER_HEIGHT}"/></svg>`
-// How much of a cell one character of text takes on the desktop, whose font is
-// proportional: measured off the desktop at about 7.75pt a cell, "Ctx" is 18pt
-// and "8%" 16pt.
-export const DESKTOP_TEXT = 0.85
 
-// Desktop only: what the row adds at its left and right, in points, so the first
-// and last reading sit as far from the band's edge as a reading sits from a
-// divider (DIVIDER_GAP cells). The band gives 7pt of it itself (measured off the
-// desktop at 2x: 14px from its edge to the old pills). A margin comes only in
-// whole cells, so it is a blank drawing this wide (CSS pixels, as Svg sizes are).
-// An empty drawing with a blank alt was dropped by the desktop, so it holds a
-// clear rect and says what it is.
+// Desktop edge spacers, so the first and last reading sit one divider gap from
+// the band's edge. The band leaves 7pt itself; margins come only in whole cells,
+// hence a blank drawing for the rest (with a clear rect: an empty one is dropped).
 const BAND_SIDE = 7
 export const SIDE_INSET = DIVIDER_GAP.desktop * CELL - BAND_SIDE
 export const SIDE_SVG =
   `<svg xmlns="http://www.w3.org/2000/svg" width="${SIDE_INSET}" height="${TRACK_HEIGHT}" viewBox="0 0 ${SIDE_INSET} ${TRACK_HEIGHT}">` +
   `<rect width="${SIDE_INSET}" height="${TRACK_HEIGHT}" fill="#000" fill-opacity="0"/></svg>`
-// The cells the two side drawings take on the desktop (a cell is about 7.75pt).
 export const SIDE_CELLS = Math.ceil((2 * SIDE_INSET) / CELL)
 
 export const FIGURE_SPACE = '\u2007'
-// The token-speed bolt on the desktop, drawn rather than typed. The ⚡ character
-// is an emoji there, and an emoji carries side bearings of its own: its ink began
-// 3px (1.5pt) further in than any other pill's text, so that pill's left padding
-// looked wider than its right. A drawing has no bearings, so its ink starts
-// exactly at the padding. Sized and coloured to the emoji it replaces (8 × 11pt).
+// Desktop bolt, drawn rather than typed: the ⚡ emoji's side bearings set its ink
+// 1.5pt further in than any other reading's text. Sized to the emoji (8 × 11pt).
 export const BOLT_WIDTH = 8
 export const BOLT_HEIGHT = 11
 export const BOLT_SVG =
   `<svg xmlns="http://www.w3.org/2000/svg" width="${BOLT_WIDTH}" height="${BOLT_HEIGHT}" viewBox="0 0 8 11">` +
   `<path fill="#e9a23b" d="M5.2 0 0 6.3h3.3L2.7 11 8 4.6H4.6z"/></svg>`
 
-// Sized by percentages, not a viewBox, so it stretches to its slot while the
-// rounded ends stay round.
+// Sized by percentages, not a viewBox, so it stretches while its ends stay round.
 export function trackSvg(remaining: number | null, tone: Tone) {
   const r = TRACK_HEIGHT / 2
   const pct = remaining == null ? 0 : Math.round(clampPercent(remaining) * 10) / 10
-  const fill = tone === 'low' ? 'fill:#e54d4d' : tone === 'warning' ? 'fill:#e3b341' : ''
+  const fill = TONE_HEX[tone] ? `fill:${TONE_HEX[tone]}` : ''
   return `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="${TRACK_HEIGHT}">` +
     `<style>.b{fill:#0b0b0b;opacity:.1}.f{fill:#0b0b0b;${fill}}@media(prefers-color-scheme:dark){.b{fill:#eeeeee}.f{fill:#eeeeee;${fill}}}</style>` +
     `<clipPath id="c"><rect width="100%" height="${TRACK_HEIGHT}" rx="${r}"/></clipPath>` +
@@ -133,91 +127,116 @@ export function trackSvg(remaining: number | null, tone: Tone) {
     (pct > 0 ? `<rect class="f" width="${pct}%" height="${TRACK_HEIGHT}"/>` : '') + `</g></svg>`
 }
 
-// ---- the original's fit levels (responsive.mjs fitBar), in cells ----
+// Ring, drawn in place of a track from size M down on the desktop: 13px across,
+// a 2px line filled clockwise from the top with what is left, toned as the track.
+export const RING_SIZE = 13
+export const RING_STROKE = 2
+const RING_CELLS = RING_SIZE / CELL
+export function ringSvg(remaining: number | null, tone: Tone) {
+  const c = RING_SIZE / 2
+  const r = (RING_SIZE - RING_STROKE) / 2
+  const length = Math.round(2 * Math.PI * r * 100) / 100
+  const arc = Math.round(((remaining == null ? 0 : clampPercent(remaining)) / 100) * length * 100) / 100
+  const stroke = TONE_HEX[tone] ? `stroke:${TONE_HEX[tone]}` : ''
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${RING_SIZE}" height="${RING_SIZE}" viewBox="0 0 ${RING_SIZE} ${RING_SIZE}">` +
+    `<style>.b{stroke:#0b0b0b;opacity:.1}.f{stroke:#0b0b0b;${stroke}}@media(prefers-color-scheme:dark){.b{stroke:#eeeeee}.f{stroke:#eeeeee;${stroke}}}</style>` +
+    `<circle class="b" cx="${c}" cy="${c}" r="${r}" fill="none" stroke-width="${RING_STROKE}"/>` +
+    (arc > 0 ? `<circle class="f" cx="${c}" cy="${c}" r="${r}" fill="none" stroke-width="${RING_STROKE}" stroke-linecap="round" stroke-dasharray="${arc} ${length}" transform="rotate(-90 ${c} ${c})"/>` : '') +
+    `</svg>`
+}
+
+// ---- sizes ----
+
+type Size = {
+  name: string
+  from: number // breakpoint in bar columns; 0 = wherever it fits
+  labels: 'full' | 'short' | null
+  meter: 'bar' | 'ring'
+  countdown: 'full' | 'short' | null
+  speed: 'token/s' | 'tok/s' | 't/s' | null
+  context: 'Context' | 'Ctx' | null
+}
+
+// Widest first. A size is used from its breakpoint until a wider one takes over,
+// and only where its content fits; otherwise the next one down is tried. The
+// breakpoints were designed as desktop band widths and converted with
+// floor((pt - 14) / CELL) - SIDE_CELLS: 642pt, 543pt, 459pt and 411pt. Wk / 5h
+// outlast Context, as an unlabelled figure is the harder thing to read.
+const SIZES: readonly Size[] = [
+  { name: 'XXL', from: 78, labels: 'full', meter: 'bar', countdown: 'full', speed: 'token/s', context: 'Context' },
+  { name: 'XL', from: 65, labels: 'short', meter: 'bar', countdown: 'full', speed: 'tok/s', context: 'Ctx' },
+  { name: 'L', from: 54, labels: 'short', meter: 'bar', countdown: 'short', speed: 't/s', context: 'Ctx' },
+  { name: 'M', from: 48, labels: 'short', meter: 'ring', countdown: null, speed: 't/s', context: 'Ctx' },
+  { name: 'S', from: 0, labels: 'short', meter: 'ring', countdown: null, speed: null, context: 'Ctx' },
+  { name: 'XS', from: 0, labels: 'short', meter: 'ring', countdown: null, speed: null, context: null },
+  { name: 'XXS', from: 0, labels: null, meter: 'ring', countdown: null, speed: null, context: null },
+]
+export const LEVELS = SIZES.length
+
 export type Layout = {
-  stage: 0 | 1 | 2 | 3
-  tight: boolean        // tighter pill spacing (original: gap 6px, then 3px)
-  reset: boolean        // reset countdown shown at all (smallest drops it)
-  compactReset: boolean // "2d" vs "2d 2h"
-  compactLabels: boolean// Wk / 5h / tok/s / Ctx
-  quotaLabels: boolean  // the Wk / 5h labels at all (only the narrowest drops them)
-  context: boolean      // the Context pill at all (only the narrowest drops it)
-  bolt: boolean
-  speed: boolean        // token-speed pill shown (smallest drops it)
-  trackBase: number     // cells a track needs at the least; it grows past that
+  name: string
+  minColumns: number
+  quotaLabels: boolean
+  shortLabels: boolean
+  ring: boolean // desktop only; the terminal draws tracks at every size
+  reset: boolean
+  compactReset: boolean
+  speed: boolean
+  speedUnit: string
+  context: boolean
+  contextLabel: string
 }
 
-// Five sizes, each giving up one more thing as the chat narrows:
-//   0 biggest   everything
-//   1 small     short labels (Wk, 5h, tok/s, Ctx), one countdown unit, ⚡ kept
-//   2 smaller   no reset times and no token-speed pill
-//   3 narrow    no Context pill: the Wk / 5h labels outlast it, since a figure
-//               with no label is the harder thing to read
-//   4 smallest  no Wk / 5h labels, so each quota pill is a track and a figure
-// The labels have a step of their own: tied to the reset times, they went while
-// there was still plenty of room for them.
-export const LEVELS = 5
 export function layoutFor(level: number): Layout {
-  const stage = (level === 0 ? 0 : level === 1 ? 2 : 3) as Layout['stage']
+  const s = SIZES[Math.max(0, Math.min(LEVELS - 1, level))]!
   return {
-    stage,
-    tight: level >= 1,
-    reset: level < 2,
-    compactReset: level >= 1,
-    compactLabels: level >= 1,
-    quotaLabels: level < 4,
-    context: level < 3,
-    bolt: true, // the ⚡ stays wherever token speed shows
-    speed: level < 2,
-    // The least a track may be for a size to count as fitting. It grows into
-    // whatever the row has spare, so it need not reserve a comfortable length:
-    // reserving 12 cells at the biggest size asked for some 20 more columns than
-    // the row needs, and the biggest size never showed in a real chat window.
-    trackBase: 2,
+    name: s.name,
+    minColumns: s.from,
+    quotaLabels: s.labels !== null,
+    shortLabels: s.labels === 'short',
+    ring: s.meter === 'ring',
+    reset: s.countdown !== null,
+    compactReset: s.countdown === 'short',
+    speed: s.speed !== null,
+    speedUnit: s.speed ?? '',
+    context: s.context !== null,
+    contextLabel: s.context ?? '',
   }
-}
-
-// The original's width thresholds (620 and 490 CSS px of composer) as cells
-// at ~8px each: below them a size is the most the row may use.
-export function minimumLevel(columns: number) {
-  return columns <= 61 ? 2 : columns <= 77 ? 1 : 0
 }
 
 type Texts = { weekly: string[]; five: string[]; speed: string; context: string }
 
-// Width of the row at a layout, in cells, tracks at their base — what the drawing
-// below lays out. A reading has no chrome of its own; between two readings sits
-// a divider, a cell wide counted whole (the desktop's 1px hairline included), with
-// DIVIDER_GAP either side. Measured on the desktop, a cell is about 7.75pt and
-// text there is proportional and narrower than its cells (DESKTOP_TEXT).
-export function rowWidth(L: Layout, t: { weekly: string[]; five: string[]; speed: string; context: string }, isTerminal: boolean) {
-  const chrome = 0
+// The row's width at a layout, in cells, with tracks at their base: what the
+// drawing below lays out. Readings carry no chrome; a divider is counted as a
+// whole cell (the desktop's 1px hairline included) plus DIVIDER_GAP each side.
+export function rowWidth(L: Layout, t: Texts, isTerminal: boolean) {
   const divider = 1 + 2 * DIVIDER_GAP[isTerminal ? 'terminal' : 'desktop']
   const gap = 1 // never 0: a terminal would run the texts together
   const k = isTerminal ? 1 : DESKTOP_TEXT
-  const textPill = (parts: string[]) => {
+  const textWidth = (parts: string[]) => {
     const shown = parts.filter(Boolean)
-    return chrome + Math.ceil(k * shown.reduce((s, x) => s + x.length, 0)) + gap * Math.max(0, shown.length - 1)
+    return Math.ceil(k * shown.reduce((sum, x) => sum + x.length, 0)) + gap * Math.max(0, shown.length - 1)
   }
-  // label · track · figure · countdown, a gap between each; the track is counted
-  // at its base apart from the text, which on the desktop is narrower than cells
+  // label · meter · figure · countdown, a gap between each
   const quota = (label: string, value: string, reset: string) => {
-    const texts = [label, value, L.reset ? reset : ''].filter(Boolean)
-    return chrome + Math.ceil(k * texts.reduce((a, x) => a + x.length, 0)) + L.trackBase + gap * texts.length
+    const meter = L.ring && !isTerminal ? RING_CELLS : TRACK_BASE
+    return textWidth([label, value, L.reset ? reset : '']) + meter + gap
   }
   const vw = Math.max((t.weekly[0] ?? '—').length, (t.five[0] ?? '—').length)
   const rw = Math.max((t.weekly[1] ?? '').length, (t.five[1] ?? '').length)
-  const wk = quota(!L.quotaLabels ? '' : L.compactLabels ? 'Wk' : 'Weekly', (t.weekly[0] ?? '—').padStart(vw), (t.weekly[1] ?? '').padEnd(rw))
-  const fh = quota(!L.quotaLabels ? '' : L.compactLabels ? '5h' : '5-hour', (t.five[0] ?? '—').padStart(vw), (t.five[1] ?? '').padEnd(rw))
-  const sp = L.speed ? textPill([L.bolt ? '⚡' : '', t.speed, L.compactLabels ? 'tok/s' : 'token/s']) : 0
-  const cx = L.context ? textPill([L.compactLabels ? 'Ctx' : 'Context', t.context]) : 0
+  const wk = quota(!L.quotaLabels ? '' : L.shortLabels ? 'Wk' : 'Weekly', (t.weekly[0] ?? '—').padStart(vw), (t.weekly[1] ?? '').padEnd(rw))
+  const fh = quota(!L.quotaLabels ? '' : L.shortLabels ? '5h' : '5-hour', (t.five[0] ?? '—').padStart(vw), (t.five[1] ?? '').padEnd(rw))
+  const sp = L.speed ? textWidth(['⚡', t.speed, L.speedUnit]) : 0
+  const cx = L.context ? textWidth([L.contextLabel, t.context]) : 0
   const readings = 2 + (L.speed ? 1 : 0) + (L.context ? 1 : 0)
   return wk + fh + sp + cx + divider * (readings - 1)
 }
 
+// The widest size whose breakpoint the row has reached and whose content fits.
 export function fitLevel(columns: number, isTerminal: boolean, t: Texts) {
-  for (let level = minimumLevel(columns); level < LEVELS; level++) {
+  for (let level = 0; level < LEVELS; level++) {
     const L = layoutFor(level)
+    if (columns < L.minColumns) continue
     const texts = {
       weekly: [t.weekly[0] ?? '—', L.compactReset ? t.weekly[2] ?? '' : t.weekly[1] ?? ''],
       five: [t.five[0] ?? '—', L.compactReset ? t.five[2] ?? '' : t.five[1] ?? ''],
@@ -367,7 +386,8 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined) {
+    // Older builds raise turn.start for subagents too, with their agentId.
+    if ((e as { agentId?: string }).agentId === undefined) {
       activeTurn = e.turnId
       samples = []
       await update($, speed, () => null)
@@ -452,29 +472,21 @@ export const register: Register = on => {
     await read($, tick)
     // Until this chat's hooks have drawn a reading, the saved one is drawn straight
     // from the store: the figures are already there, and waiting for the hooks left
-    // a new chat's quota pills at "—" for the first sync tick (5s).
+    // a new chat's quota readings at "—" for the first sync tick (5s).
     const held = await read($, usage)
     const saved = held?.fiveHour || held?.weekly ? null : (await savedReading($)).limits
     const u = saved?.length ? { ...toUsage(saved, { window: 0 } as SessionContextUsage), context: held?.context ?? null } : held
     const tps = await read($, speed)
     const now = await $.clock.now()
-    // No inset of the row's own: the band's own gap above the pills is the gap
-    // at their left and right too (see the row below).
-    const INSET = 0
     const isTerminal = e.surface === 'terminal'
-    const columns = e.props.bodyColumns - INSET * 2 - (isTerminal || !Svg ? 0 : SIDE_CELLS)
+    const desktop = !isTerminal && !!Svg
+    const columns = e.props.bodyColumns - (desktop ? SIDE_CELLS : 0)
 
     const weekly = windowState(u?.weekly ?? null, now)
     const five = windowState(u?.fiveHour ?? null, now)
     const context = u?.context ?? null
     const speedValue = tps == null ? '—' : `~${tps}`
 
-    // Levels are tried in order and the fullest that fits is kept. Three sizes:
-    //   biggest  everything
-    // The remaining percentage never carries the word "left".
-    //   small    short labels (Wk, 5h, tok/s, Ctx), one countdown unit, ⚡ kept
-    //   smallest the reset times, the token-speed pill and the Wk / 5h labels go,
-    //            leaving a track and a figure in each quota pill
     const level = fitLevel(columns, isTerminal, {
       weekly: [percentText(weekly.remaining), resetText(weekly.resetsAt, now, false, false), resetText(weekly.resetsAt, now, true)],
       five: [percentText(five.remaining), resetText(five.resetsAt, now), resetText(five.resetsAt, now, true)],
@@ -484,140 +496,128 @@ export const register: Register = on => {
     const L = layoutFor(level)
 
     const quotaParts = (label: string, short: string, w: ReturnType<typeof windowState>, withMinutes: boolean) => ({
-      label: L.quotaLabels ? (L.compactLabels ? short : label) : '',
+      label: L.quotaLabels ? (L.shortLabels ? short : label) : '',
       value: percentText(w.remaining),
       reset: L.reset ? resetText(w.resetsAt, now, L.compactReset, withMinutes) : null,
     })
     const wk = quotaParts('Weekly', 'Wk', weekly, false)
     const fh = quotaParts('5-hour', '5h', five, true)
-    // Same tracks for Weekly and 5-hour: their texts are padded to equal widths
-    // (figure spaces, as wide as a tabular digit), so with equal pills the
-    // tracks come out the same length at every size.
-    const padTo = (a: string, b: string) => Math.max(a.length, b.length)
-    const valueWidth = padTo(wk.value, fh.value)
+    // Pad Weekly's and 5-hour's texts to equal widths with figure spaces, so the
+    // terminal's two tracks come out the same length.
+    const valueWidth = Math.max(wk.value.length, fh.value.length)
     wk.value = wk.value.padStart(valueWidth, FIGURE_SPACE)
     fh.value = fh.value.padStart(valueWidth, FIGURE_SPACE)
     if (wk.reset != null && fh.reset != null) {
-      const resetWidth = padTo(wk.reset, fh.reset)
+      const resetWidth = Math.max(wk.reset.length, fh.reset.length)
       wk.reset = wk.reset.padEnd(resetWidth, FIGURE_SPACE)
       fh.reset = fh.reset.padEnd(resetWidth, FIGURE_SPACE)
     }
-    const speedUnit = L.compactLabels ? 'tok/s' : 'token/s'
-    const showBolt = L.bolt
-    const ctxLabel = L.compactLabels ? 'Ctx' : 'Context'
-    const sideSpacer = (key: string) => (!isTerminal && Svg
-      ? <Box key={key} flexShrink={0}><Svg source={SIDE_SVG} alt="spacing" width={SIDE_INSET} height={TRACK_HEIGHT} /></Box>
-      : null)
 
-    // Terminal track: the original's base (100px ≈ 12 cells at full, 16px ≈ 2
-    // cells after), plus 70% of the spare cells shared by the two tracks.
+    // Terminal tracks take all the spare cells between them, so no reading is
+    // left with a wider gap before its divider than the rest. An odd cell goes to
+    // Weekly; one is held back for the ⚡, which the terminal draws two cells wide.
     const natural = rowWidth(L, {
       weekly: [percentText(weekly.remaining), wk.reset ?? ''], five: [percentText(five.remaining), fh.reset ?? ''], speed: speedValue, context: percentText(context),
-    }, e.surface === 'terminal')
-    const trackWidth = L.trackBase + Math.max(0, Math.floor(((columns - natural) * 0.7) / 2))
+    }, isTerminal)
+    const spare = Math.max(0, columns - natural - (L.speed ? 1 : 0))
+    const trackWidth = TRACK_BASE + Math.floor(spare / 2)
+    const oddCell = spare % 2
 
-    const fillColor = (t: Tone) => (t === 'low' ? 'error' : t === 'warning' ? 'warning' : 'text')
+    const toneColor = (t: Tone) => (t === 'low' ? 'error' : t === 'warning' ? 'warning' : 'text')
 
-    // Desktop: the Codex track, a 4.5px fully rounded bar (.cu-track's shape),
-    // filled with the text color, yellow/red by tone, its rest the text color at 10%.
-    // Terminal: a heavy line for what is left over a light one for the rest, the
-    // nearest a character grid can draw.
-    const track = (remaining: number | null) => {
+    // A quota's meter. Desktop: a ring, or a 3px track that takes what its reading
+    // has spare. Terminal: a heavy line for what is left over a light one.
+    const meter = (remaining: number | null, extra = 0) => {
       const tone = quotaTone(remaining)
-      if (e.surface !== 'terminal' && Svg) {
-        // Centered, never stretched to the row's height: the bar stays 4.5px.
+      const alt = remaining == null ? 'unavailable' : `${Math.round(remaining)}% left`
+      if (desktop && L.ring) {
         return (
-          // The track takes what its reading has left. Both quota readings grow
-          // alike and hold same-size text, so both tracks are always about the
-          // same length, growing and shrinking together; nothing overflows.
-          <Box flexDirection="column" justifyContent="center" alignSelf="center" flexGrow={1} flexShrink={1} minWidth={2}>
-            <Svg source={trackSvg(remaining, tone)} alt={remaining == null ? 'unavailable' : `${Math.round(remaining)}% left`} height={TRACK_HEIGHT} />
+          <Box flexShrink={0} alignSelf="center">
+            <Svg source={ringSvg(remaining, tone)} alt={alt} width={RING_SIZE} height={RING_SIZE} />
           </Box>
         )
       }
-      const filled = remaining == null ? 0 : Math.round((remaining / 100) * trackWidth)
+      if (desktop) {
+        return (
+          <Box flexDirection="column" justifyContent="center" alignSelf="center" flexGrow={1} flexShrink={1} minWidth={2}>
+            <Svg source={trackSvg(remaining, tone)} alt={alt} height={TRACK_HEIGHT} />
+          </Box>
+        )
+      }
+      const width = trackWidth + extra
+      const filled = remaining == null ? 0 : Math.round((remaining / 100) * width)
       return (
         <Text>
-          <Text color={fillColor(tone)}>{'━'.repeat(filled)}</Text>
-          <Text color="subtle">{'─'.repeat(trackWidth - filled)}</Text>
+          <Text color={toneColor(tone)}>{'━'.repeat(filled)}</Text>
+          <Text color="subtle">{'─'.repeat(width - filled)}</Text>
         </Text>
       )
     }
 
-    // A reading: its parts side by side, one cell apart, with no border, padding
-    // or fill of its own. The two quota readings share the row's spare width
-    // equally (grow 1 each) and give it back equally when it is short; the others
-    // hug their content.
-    const reading = (key: string, grow: number, children: any[]) => (
-      <Box key={key} flexDirection="row" columnGap={1} alignItems="center" flexGrow={grow} justifyContent="flex-start" flexShrink={grow > 0 ? 1 : 0} minWidth={0} overflow="hidden">
+    // A reading: its parts one cell apart, with no border, padding or fill. Quota
+    // readings with tracks share the row's spare width; the rest hug their content.
+    const reading = (key: string, grow: boolean, children: any[]) => (
+      <Box key={key} flexDirection="row" columnGap={1} alignItems="center" flexGrow={grow ? 1 : 0} flexShrink={grow ? 1 : 0} minWidth={0} overflow="hidden">
         {children}
       </Box>
     )
     const divider = (key: string) => (
       <Box key={key} flexShrink={0} alignSelf="center">
-        {!isTerminal && Svg
+        {desktop
           ? <Svg source={DIVIDER_SVG} alt="divider" width={1} height={DIVIDER_HEIGHT} />
           : <Text color="promptBorder">│</Text>}
       </Box>
     )
+    const sideSpacer = (key: string) => (desktop
+      ? <Box key={key} flexShrink={0}><Svg source={SIDE_SVG} alt="spacing" width={SIDE_INSET} height={TRACK_HEIGHT} /></Box>
+      : null)
 
-    // Each part sits at its own width, one cell from the next: no slot sized to
-    // the longer of the two readings' texts, which left uneven room in the gaps.
-    // The terminal keeps its figure-space padding, whose cells hold its tracks equal.
-    const fit = (t: string) => (isTerminal ? t : t.replace(/ /g, ''))
-    // Each text part is held at its own width (no width given, so it hugs the
-    // text and leaves no slack in the gap). A bare Text in a reading that is short
-    // of room shrinks before the track does and wraps: "15h 0m" broke onto two
-    // lines and the row doubled in height while its track still had room to spare.
+    // The desktop's text is proportional, so the figure-space padding comes off
+    // there. Each text part holds its width: a bare Text shrinks before a track
+    // does and wraps ("15h 0m" broke onto two lines).
+    const shown = (t: string) => (isTerminal ? t : t.split(FIGURE_SPACE).join(''))
     const part = (child: any) => <Box flexShrink={0}>{child}</Box>
-    // The figure keeps the app's own type; it takes its track's colour when the
-    // quota runs low.
     const figure = (text: string, tone: Tone) =>
-      part(<Text color={tone === 'normal' ? undefined : fillColor(tone)}>{fit(text)}</Text>)
-    const quotaReading = (key: string, p: typeof wk, w: ReturnType<typeof windowState>) =>
-      reading(key, 1, [
-        ...(p.label ? [part(<Text color="inactive">{fit(p.label)}</Text>)] : []),
-        track(w.remaining),
+      part(<Text color={tone === 'normal' ? undefined : toneColor(tone)}>{shown(text)}</Text>)
+    const quotaReading = (key: string, p: typeof wk, w: ReturnType<typeof windowState>, extra = 0) =>
+      reading(key, !(desktop && L.ring), [
+        ...(p.label ? [part(<Text color="inactive">{shown(p.label)}</Text>)] : []),
+        meter(w.remaining, extra),
         figure(p.value, quotaTone(w.remaining)),
-        ...(p.reset == null ? [] : [part(<Text color="inactive">{fit(p.reset)}</Text>)]),
+        ...(p.reset == null ? [] : [part(<Text color="inactive">{shown(p.reset)}</Text>)]),
       ])
 
     const readings = [
-      quotaReading('weekly', wk, weekly),
+      quotaReading('weekly', wk, weekly, oddCell),
       quotaReading('five-hour', fh, five),
       L.speed
-        ? reading('speed', 0, [
-            ...(showBolt
-              ? [!isTerminal && Svg
-                  ? <Svg source={BOLT_SVG} alt="token speed" width={BOLT_WIDTH} height={BOLT_HEIGHT} />
-                  : <Text color="inactive">⚡</Text>]
-              : []),
+        ? reading('speed', false, [
+            desktop
+              ? <Svg source={BOLT_SVG} alt="token speed" width={BOLT_WIDTH} height={BOLT_HEIGHT} />
+              : <Text color="inactive">⚡</Text>,
             <Text>{speedValue}</Text>,
-            <Text color="inactive">{speedUnit}</Text>,
+            <Text color="inactive">{L.speedUnit}</Text>,
           ])
         : null,
       L.context
-        ? reading('context', 0, [
-            <Text color="inactive">{ctxLabel}</Text>,
+        ? reading('context', false, [
+            <Text color="inactive">{L.contextLabel}</Text>,
             figure(percentText(context), contextTone(context)),
           ])
         : null,
     ].filter(Boolean)
 
+    // Readings with a divider between each two, DIVIDER_GAP either side of it;
+    // the desktop's side spacers give the ends the same space. Rings don't
+    // stretch, so where they are drawn the spare room is spread evenly instead.
+    // Spacing is in plain cells: older Claude Code builds refuse named steps.
     const bar = (
-      // The readings sit in an inner row with a divider between each two,
-      // DIVIDER_GAP cells of space either side of it; on the desktop a blank
-      // SIDE_INSET-wide drawing at each end gives the first and last reading the
-      // same space to the band's edge. The gaps inside a reading stay one cell.
-      // Spacing is in plain cells (older Claude Code builds refuse named steps).
-      // Nothing here sets a height or a font size: the row stays one text row in
-      // the app's own type.
-      <Box flexDirection="row" flexWrap="nowrap" marginX={INSET} marginY={0} overflow="hidden">
-      {sideSpacer('left')}
-      <Box flexDirection="row" columnGap={DIVIDER_GAP[isTerminal ? 'terminal' : 'desktop']} alignItems="center" flexWrap="nowrap" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
-        {readings.flatMap((r, i) => (i === 0 ? [r] : [divider(`divider-${i}`), r]))}
-      </Box>
-      {sideSpacer('right')}
+      <Box flexDirection="row" flexWrap="nowrap" overflow="hidden">
+        {sideSpacer('left')}
+        <Box flexDirection="row" columnGap={DIVIDER_GAP[isTerminal ? 'terminal' : 'desktop']} alignItems="center" justifyContent={desktop && L.ring ? 'space-evenly' : 'flex-start'} flexWrap="nowrap" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+          {readings.flatMap((r, i) => (i === 0 ? [r] : [divider(`divider-${i}`), r]))}
+        </Box>
+        {sideSpacer('right')}
       </Box>
     )
     return survey ? <Box flexDirection="column">{bar}{survey}</Box> : bar
