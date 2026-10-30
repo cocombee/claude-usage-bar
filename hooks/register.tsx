@@ -252,7 +252,8 @@ export function fitLevel(columns: number, isTerminal: boolean, t: Texts) {
 // session.start below). The older key held the limits alone, with no time.
 const LATEST_LIMITS = 'latestRateLimits'
 const LAST_LIMITS = 'lastRateLimits'
-type Reading = { at: number; limits: readonly SessionRateLimit[] }
+// `live`: read from the usage panel's endpoint, not from a reply's headers.
+type Reading = { at: number; limits: readonly SessionRateLimit[]; live?: boolean }
 // How often a chat looks for a newer reading from another chat.
 export const SYNC_EVERY = 5_000
 
@@ -272,7 +273,7 @@ async function savedReading($: any): Promise<Reading> {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const v: any = await $.store.get(LATEST_LIMITS)
-      if (v && Array.isArray(v.limits) && Number.isFinite(v.at)) return { at: v.at, limits: v.limits }
+      if (v && Array.isArray(v.limits) && Number.isFinite(v.at)) return { at: v.at, limits: v.limits, live: v.live === true }
       const old = await $.store.get(LAST_LIMITS)
       return { at: 0, limits: Array.isArray(old) ? (old as SessionRateLimit[]) : [] }
     } catch (err) {
@@ -306,13 +307,34 @@ async function draw($: any, box: Shown, limits: readonly SessionRateLimit[], con
   })
 }
 
+// Two readings of one window: the same kind with reset times within a quarter
+// hour (a reply's headers give the time to the minute, the usage panel's to
+// the millisecond).
+const sameWindow = (a: SessionRateLimit, b: SessionRateLimit) => {
+  const ta = Date.parse(a.resetsAt ?? ''), tb = Date.parse(b.resetsAt ?? '')
+  return a.kind === b.kind && Number.isFinite(ta) && Number.isFinite(tb) && Math.abs(ta - tb) < 15 * 60_000
+}
+
+// A reply's headers carry usage as it stood when the request was let in, in
+// whole points, so they run up to a point under the app's own panel. Within one
+// window usage only grows: a header reading never pulls a figure back below the
+// higher one already held. A new window (a later reset time) is taken as it is.
+export function foldLimits(held: readonly SessionRateLimit[], incoming: readonly SessionRateLimit[]) {
+  return incoming.map(l => {
+    const prev = held.find(h => sameWindow(h, l))
+    return prev && prev.percentUsed > l.percentUsed ? { ...l, percentUsed: prev.percentUsed } : l
+  })
+}
+
 // Shows `limits` (keeping Context as it is) and, for a reading of this chat's
-// own, saves it for the others.
-async function adopt($: any, box: Shown, limits: readonly SessionRateLimit[], at: number, save: boolean) {
+// own, saves it for the others. A live reading (the usage panel's own figure)
+// replaces what is held; any other is folded into it.
+async function adopt($: any, box: Shown, limits: readonly SessionRateLimit[], at: number, save: boolean, live = false) {
   if (!limits.length) return
-  box.current = { at, limits }
+  if (!live) limits = foldLimits(box.current.limits, limits)
+  box.current = { at, limits, live }
   await draw($, box, limits)
-  if (save) await saveReading($, { at, limits })
+  if (save) await saveReading($, { at, limits, live })
 }
 
 // A reading of this chat's own: shown, and shared with the other chats.
@@ -321,6 +343,63 @@ async function ownReading($: any, box: Shown) {
     const u = await $.session.usage()
     if (u.rateLimits.length) await adopt($, box, u.rateLimits, await $.clock.now(), true)
   } catch { /* the next reading lands it */ }
+}
+
+// ---- the live reading: the figure the Claude app's usage panel shows ----
+// The account's usage, read from the same endpoint the app's panel and /usage
+// read, with the session's own credential (the engine holds it; the mod sees
+// only a handle). Unlike the headers it counts every chat and claude.ai, the
+// reply just finished included, and is read on a clock, not only per reply.
+export const LIVE_URL = 'https://api.anthropic.com/api/oauth/usage'
+export const LIVE_EVERY = 60_000
+// After a refused or failed read, the next waits this long.
+export const LIVE_BACKOFF = 5 * 60_000
+// When any chat last read it, shared so several open chats read it once a minute
+// between them; the others take the reading from the store on their sync tick.
+const LIVE_AT = 'liveReadAt'
+
+export function parseLive(text: string): SessionRateLimit[] {
+  const body = JSON.parse(text)
+  const out: SessionRateLimit[] = []
+  for (const [key, kind] of [['five_hour', 'five_hour'], ['seven_day', 'seven_day']] as const) {
+    const w = body?.[key]
+    // `utilization` is 0–100, or null for a window with no reading: never 0%.
+    const used = w?.utilization
+    if (typeof used === 'number' && Number.isFinite(used)) {
+      const resetsAt = typeof w.resets_at === 'string' && Number.isFinite(Date.parse(w.resets_at)) ? new Date(w.resets_at).toISOString() : undefined
+      out.push({ kind, percentUsed: Math.round(used * 10) / 10, ...(resetsAt ? { resetsAt } : {}) })
+    }
+  }
+  return out
+}
+
+type Live = { busy: boolean; waitUntil: number }
+
+// Reads it unless any chat did within `gap`.
+async function liveReading($: any, box: Shown, live: Live, gap = LIVE_EVERY - 5_000) {
+  if (live.busy) return
+  const now = await $.clock.now()
+  if (now < live.waitUntil) return
+  live.busy = true
+  try {
+    let last = 0
+    try { last = Number(await $.store.get(LIVE_AT)) || 0 } catch { /* read anyway */ }
+    if (now - last < gap) return
+    const auth = await $.session.authorize()
+    if (!auth?.handle) { live.waitUntil = now + LIVE_BACKOFF; return }
+    try { await $.store.set(LIVE_AT, now) } catch { /* only costs a second read */ }
+    const res = await $.http.fetch(LIVE_URL, {
+      auth: auth.handle,
+      headers: { 'anthropic-beta': 'oauth-2025-04-20', 'content-type': 'application/json' },
+    })
+    const limits = res.ok ? parseLive(res.text) : []
+    if (!limits.length) { live.waitUntil = now + LIVE_BACKOFF; return }
+    await adopt($, box, limits, await $.clock.now(), true, true)
+  } catch {
+    live.waitUntil = now + LIVE_BACKOFF // the headers' reading stands meanwhile
+  } finally {
+    live.busy = false
+  }
 }
 
 export const register: Register = on => {
@@ -336,6 +415,7 @@ export const register: Register = on => {
   // Anthropic reset early) reaches the others within the tick, not at their own
   // next reply.
   const box: Shown = { current: { at: 0, limits: [] } }
+  const live: Live = { busy: false, waitUntil: 0 }
 
   // The 5-hour and weekly limits arrive with the API's reply to a request, so a
   // new chat has none until its first message and the bar sat at "—" till then.
@@ -348,7 +428,7 @@ export const register: Register = on => {
     if (Number.isFinite(u.context?.window)) contextWindow = u.context.window
     // This chat's own reading wins; until it has one, the newest one saved.
     const saved = await savedReading($)
-    const own = u.rateLimits.length ? { at: await $.clock.now(), limits: u.rateLimits } : saved
+    const own = u.rateLimits.length ? { at: await $.clock.now(), limits: foldLimits(saved.limits, u.rateLimits) } : saved
     box.current = own
     await draw($, box, own.limits, u.context)
     if (u.rateLimits.length) await saveReading($, own)
@@ -356,8 +436,11 @@ export const register: Register = on => {
     // of one small file, and a redraw only when the figures moved.
     $.clock.every(SYNC_EVERY, () => void (async () => {
       const latest = await savedReading($)
-      if (latest.at > box.current.at) await adopt($, box, latest.limits, latest.at, false)
+      if (latest.at > box.current.at) await adopt($, box, latest.limits, latest.at, false, latest.live)
     })())
+    // The usage panel's own figure, now and then once a minute among all chats.
+    void liveReading($, box, live)
+    $.clock.every(15_000, () => void liveReading($, box, live))
     // Keep reset countdowns moving between API responses.
     $.clock.every(30_000, () => void update($, tick, t => t + 1))
     return result
@@ -368,8 +451,9 @@ export const register: Register = on => {
     if (Number.isFinite(e.context?.window)) contextWindow = e.context.window
     if (e.rateLimits.length) {
       const at = await $.clock.now()
-      box.current = { at, limits: e.rateLimits }
-      await draw($, box, e.rateLimits, e.context)
+      const limits = foldLimits(box.current.limits, e.rateLimits)
+      box.current = { at, limits }
+      await draw($, box, limits, e.context)
       await saveReading($, box.current)
     } else {
       // A measurement with no limits in it says only that context moved, as a new
@@ -453,6 +537,8 @@ export const register: Register = on => {
   // Clears to "—" when the turn finishes, as the original did.
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
+    // What the turn just used, as the panel counts it.
+    if ((e as { agentId?: string }).agentId === undefined) void liveReading($, box, live, 10_000)
     if (e.turnId === activeTurn) {
       activeTurn = null
       samples = []

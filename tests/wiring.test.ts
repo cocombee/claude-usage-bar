@@ -1,7 +1,7 @@
 import { test, expect, mock } from 'claude-code/testing'
 
 import { shown, exactly } from './shown'
-import { repairStore } from '../hooks/register'
+import { repairStore, foldLimits, parseLive, LIVE_URL } from '../hooks/register'
 
 // Wiring: every figure comes from the engine's own events, as a session raises them.
 
@@ -336,4 +336,93 @@ test('each response reads the limits and shares them with the other chats', asyn
   const saved: any = db.latestRateLimits
   expect(saved.limits[0].percentUsed).toBe(13)
   expect(saved.at).toBe(clock.now())
+})
+
+// The live reading: the usage panel's own figure, from the endpoint the app
+// reads, not the whole-point figure a reply's headers carried.
+function liveUsage(on: any, body: () => unknown, calls: any[] = []) {
+  on('session.authorize', () => ({ value: { handle: 'h1', kind: 'bearer' } }))
+  on('http.fetch', (_$: any, e: any) => {
+    calls.push(e)
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body()) } }
+  })
+  return calls
+}
+
+test('the usage panel figure replaces the headers’ one and is shared, read with the session credential', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const db = sharedStore(on)
+  const resets = new Date(clock.now() + 4 * 24 * HOUR).toISOString()
+  const calls = liveUsage(on, () => ({ five_hour: { utilization: 1, resets_at: null }, seven_day: { utilization: 44, resets_at: resets } }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [
+    { kind: 'seven_day', percentUsed: 43, resetsAt: resets },
+  ] } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const ui = await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) })
+  expect(await has(ui, '56%')).toBe(true)          // 100 − 44, the panel's figure
+  expect(await has(ui, '57%')).toBe(false)         // not the headers' 43
+  expect(calls[0].url).toBe(LIVE_URL)
+  expect(calls[0].init.auth).toBe('h1')
+  const saved: any = db.latestRateLimits
+  expect(saved.live).toBe(true)
+  expect(saved.limits.find((l: any) => l.kind === 'seven_day').percentUsed).toBe(44)
+})
+
+test('a later reply’s headers never pull the figure back below the panel’s', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  sharedStore(on)
+  const resets = new Date(clock.now() + 4 * 24 * HOUR).toISOString()
+  liveUsage(on, () => ({ seven_day: { utilization: 44, resets_at: resets } }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [] } }))
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  await $.session.measure({ context: { window: 200_000 }, changed: ['rateLimits'], rateLimits: [
+    { kind: 'seven_day', percentUsed: 43, resetsAt: new Date(Date.parse(resets) - 1000).toISOString() },
+  ] })
+  const ui = await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) })
+  expect(await has(ui, '56%')).toBe(true)
+})
+
+test('several open chats read the panel once a minute between them', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  sharedStore(on, { liveReadAt: 1_000_000 - 10_000 })   // another chat read it 10s ago
+  const calls = liveUsage(on, () => ({ seven_day: { utilization: 44, resets_at: null } }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [] } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(30_000)
+  expect(calls.length).toBe(0)
+  await clock.advance(30_000)
+  expect(calls.length).toBe(1)
+})
+
+test('a refused panel read leaves the headers’ figure and waits before trying again', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  sharedStore(on)
+  const calls: any[] = []
+  on('session.authorize', () => ({ value: { handle: 'h1', kind: 'bearer' } }))
+  on('http.fetch', (_$: any, e: any) => { calls.push(e); return { value: { status: 429, ok: false, headers: {}, text: '' } } })
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [
+    { kind: 'seven_day', percentUsed: 43, resetsAt: new Date(clock.now() + HOUR).toISOString() },
+  ] } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(2 * 60_000)
+  const ui = await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) })
+  expect(await has(ui, '57%')).toBe(true)
+  expect(calls.length).toBe(1)
+})
+
+test('folding: same window keeps the higher figure; a new window is taken as it is', () => {
+  const t = '2026-11-02T16:00:00.000Z'
+  expect(foldLimits([{ kind: 'seven_day', percentUsed: 44, resetsAt: t }], [{ kind: 'seven_day', percentUsed: 43, resetsAt: t }])[0]?.percentUsed).toBe(44)
+  expect(foldLimits([{ kind: 'seven_day', percentUsed: 44, resetsAt: t }], [{ kind: 'seven_day', percentUsed: 2, resetsAt: '2026-11-09T16:00:00.000Z' }])[0]?.percentUsed).toBe(2)
+  expect(parseLive('{"five_hour":{"utilization":12.345,"resets_at":"2026-10-29T16:19:59.912+00:00"},"seven_day":null}'))
+    .toEqual([{ kind: 'five_hour', percentUsed: 12.3, resetsAt: '2026-10-29T16:19:59.912Z' }])
+  expect(parseLive('{"five_hour":{"utilization":null,"resets_at":null},"seven_day":{"utilization":44,"resets_at":null}}'))
+    .toEqual([{ kind: 'seven_day', percentUsed: 44 }])
 })

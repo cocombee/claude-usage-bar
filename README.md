@@ -20,6 +20,11 @@ The design is adopted from [codex-usage-bar](https://github.com/cocombee/codex-u
 | **Token speed** | Approximate `~N token/s` while Claude replies: output tokens over model-response time for up to 10 responses in the turn, tool time excluded. Clears to `—` when the turn ends. |
 | **Context** | How full the current chat's context window is. |
 
+The two quota figures are the ones the Claude app's usage panel shows: read once a minute
+(shared among open chats) and after each turn from the same usage endpoint, with the chat's
+own sign-in. A reply's headers fill in between and when that read is unavailable; they can
+run a point behind, so they never lower a figure the panel already gave for that window.
+
 The two quota readings count **down** — they show what is left. Context counts **up**: it
 shows how much of the window is used. So a good day is a high Weekly and a low Context.
 
