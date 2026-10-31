@@ -1,6 +1,6 @@
 # Claude Usage Bar
 
-See your 5-hour usage, weekly usage, response speed and context just above the Claude prompt.
+See your weekly usage, your 5-hour usage (or credit, on Max), response speed and context just above the Claude prompt.
 
 <p align="center">
   <img src="assets/usage-bar-hero.png" alt="Usage Bar above the Claude Code prompt: Weekly 94%, 5-hour 62%, token speed ~68 token/s, Context 20%" width="49%">
@@ -17,6 +17,7 @@ The design is adopted from [codex-usage-bar](https://github.com/cocombee/codex-u
 | --- | --- |
 | **Weekly** | 7-day limit remaining, as a percentage, with its track and reset countdown. |
 | **5-hour** | 5-hour limit remaining, as a percentage, with its track and reset countdown. |
+| **Credit** | On Max, in the 5-hour slot: the usage credit left, as its track and the amount (`Credit ━━ $37.60`), or `Off` when the account has credit switched off. The plan is read from the account profile the app reads, so each person sees the one that applies to them; until it is known, Credit shows wherever no 5-hour window is reported. |
 | **Token speed** | Approximate `~N token/s` while Claude replies: output tokens over model-response time for up to 10 responses in the turn, tool time excluded. Clears to `—` when the turn ends. |
 | **Context** | How full the current chat's context window is. |
 

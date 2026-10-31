@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, SessionRateLimit, SessionContextUsage } from 'claude-code'
 
-import type { Usage, Window } from '../types'
+import type { Credit, Usage, Window } from '../types'
 
 // Order adopted from cocombee/codex-usage-bar:
 //   Weekly → 5-hour → Token speed → Context
@@ -16,6 +16,8 @@ import type { Usage, Window } from '../types'
 const usage = atom({ plugin: 'usage-bar', key: 'usage' } as const, null)
 const speed = atom({ plugin: 'usage-bar', key: 'speed' } as const, null)
 const tick = atom({ plugin: 'usage-bar', key: 'tick' } as const, 0)
+// true on Max, false on other plans, null until the profile has been read.
+const plan = atom({ plugin: 'usage-bar', key: 'plan' } as const, null)
 
 // ---- pure presentation rules (same policy as the original metrics.mjs) ----
 
@@ -42,6 +44,20 @@ export function resetText(resetsAtMs: number | null, now: number, compact = fals
   return days ? `${days}d ${hours}h` : hours ? (withMinutes ? `${hours}h ${mins}m` : `${hours}h`) : `${minutes}m`
 }
 
+// Credit's amount: the balance left, else what is left of the limit, else what
+// is used where the plan sets none. Compact drops the cents.
+export function creditText(c: Credit, compact = false) {
+  if (c.off) return 'Off'
+  const left = c.balance ?? (c.limit != null && c.used != null ? Math.max(0, c.limit - c.used) : null)
+  const minor = left ?? c.used
+  if (minor == null) return '—'
+  const exponent = c.exponent ?? 2
+  const major = minor / 10 ** exponent
+  const symbol = c.currency === 'USD' ? '$' : `${c.currency} `
+  const amount = compact ? `${symbol}${Math.round(major)}` : `${symbol}${major.toFixed(exponent)}`
+  return left == null ? `${amount} used` : amount
+}
+
 export type Tone = 'normal' | 'warning' | 'low'
 export function quotaTone(remaining: number | null): Tone {
   return remaining == null ? 'normal' : remaining <= 10 ? 'low' : remaining <= 20 ? 'warning' : 'normal'
@@ -56,10 +72,22 @@ function pickWindow(limits: readonly SessionRateLimit[], kind: string): Window |
   return w && Number.isFinite(w.percentUsed) ? { percentUsed: w.percentUsed, resetsAt: w.resetsAt } : null
 }
 
+// A reading's credit entry: the usage panel's extra usage (kind `credit`, with
+// its amounts), else a gateway's `spend_limit` from the headers (a percentage).
+type CreditLimit = SessionRateLimit & { used?: number | null; limit?: number | null; balance?: number | null; exponent?: number; currency?: string; off?: boolean }
+const finite = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) ? n : null)
+function pickCredit(limits: readonly SessionRateLimit[]): Credit | null {
+  const c = (limits.find(l => l.kind === 'credit') ?? limits.find(l => l.kind === 'spend_limit')) as CreditLimit | undefined
+  if (!c) return null
+  const credit = { percentUsed: finite(c.percentUsed), used: finite(c.used), limit: finite(c.limit), balance: finite(c.balance), exponent: finite(c.exponent) ?? 2, currency: c.currency ?? 'USD', ...(c.off ? { off: true } : {}) }
+  return !credit.off && credit.percentUsed == null && credit.used == null && credit.balance == null ? null : credit
+}
+
 export function toUsage(limits: readonly SessionRateLimit[], context: SessionContextUsage): Usage {
   return {
     fiveHour: pickWindow(limits, 'five_hour'),
     weekly: pickWindow(limits, 'seven_day'),
+    credit: pickCredit(limits),
     context: Number.isFinite(context?.percent) ? (context.percent as number) : null,
   }
 }
@@ -319,11 +347,14 @@ const sameWindow = (a: SessionRateLimit, b: SessionRateLimit) => {
 // whole points, so they run up to a point under the app's own panel. Within one
 // window usage only grows: a header reading never pulls a figure back below the
 // higher one already held. A new window (a later reset time) is taken as it is.
+// Credit comes only from the panel, so a header reading keeps the one held.
 export function foldLimits(held: readonly SessionRateLimit[], incoming: readonly SessionRateLimit[]) {
-  return incoming.map(l => {
+  const folded = incoming.map(l => {
     const prev = held.find(h => sameWindow(h, l))
     return prev && prev.percentUsed > l.percentUsed ? { ...l, percentUsed: prev.percentUsed } : l
   })
+  const credit = held.find(h => h.kind === 'credit')
+  return credit && !folded.some(l => l.kind === 'credit') ? [...folded, credit] : folded
 }
 
 // Shows `limits` (keeping Context as it is) and, for a reading of this chat's
@@ -357,6 +388,45 @@ export const LIVE_BACKOFF = 5 * 60_000
 // When any chat last read it, shared so several open chats read it once a minute
 // between them; the others take the reading from the store on their sync tick.
 const LIVE_AT = 'liveReadAt'
+const LIVE_ANSWER = 'liveAnswer'
+
+// Usage credit, from the newer `spend` object (amounts as { amount_minor,
+// currency, exponent }) where credit is on, else the older `extra_usage`.
+function money(m: any): { minor: number; currency?: string; exponent?: number } | null {
+  if (finite(m) != null) return { minor: m }
+  return m && finite(m.amount_minor) != null
+    ? { minor: m.amount_minor, currency: typeof m.currency === 'string' ? m.currency : undefined, exponent: finite(m.exponent) ?? undefined }
+    : null
+}
+function parseCredit(body: any): CreditLimit | null {
+  const sp = body?.spend
+  if (sp) {
+    const used = money(sp.used), limit = money(sp.limit) ?? money(sp.cap), balance = money(sp.balance)
+    if (sp.enabled === true || limit || balance) {
+      const unit = balance ?? limit ?? used
+      return {
+        kind: 'credit',
+        percentUsed: (limit && finite(sp.percent) != null ? Math.round(sp.percent * 10) / 10 : null) as unknown as number,
+        used: used?.minor ?? null, limit: limit?.minor ?? null, balance: balance?.minor ?? null,
+        exponent: unit?.exponent ?? 2, currency: (unit?.currency ?? 'USD').toUpperCase(),
+      }
+    }
+    // Switched off with nothing bought: a reading of its own, "Off", not "—".
+    if (sp.enabled === false) return { kind: 'credit', percentUsed: null as unknown as number, used: null, limit: null, off: true }
+  }
+  const x = body?.extra_usage
+  if (x && (finite(x.utilization) != null || finite(x.used_credits) != null)) {
+    return {
+      kind: 'credit',
+      percentUsed: (finite(x.utilization) == null ? null : Math.round(x.utilization * 10) / 10) as unknown as number,
+      used: finite(x.used_credits), limit: finite(x.monthly_limit),
+      exponent: finite(x.decimal_places) ?? 2,
+      currency: typeof x.currency === 'string' ? x.currency.toUpperCase() : 'USD',
+    }
+  }
+  if (x && x.is_enabled === false) return { kind: 'credit', percentUsed: null as unknown as number, used: null, limit: null, off: true }
+  return null
+}
 
 export function parseLive(text: string): SessionRateLimit[] {
   const body = JSON.parse(text)
@@ -370,6 +440,8 @@ export function parseLive(text: string): SessionRateLimit[] {
       out.push({ kind, percentUsed: Math.round(used * 10) / 10, ...(resetsAt ? { resetsAt } : {}) })
     }
   }
+  const credit = parseCredit(body)
+  if (credit) out.push(credit)
   return out
 }
 
@@ -393,13 +465,54 @@ async function liveReading($: any, box: Shown, live: Live, gap = LIVE_EVERY - 5_
       headers: { 'anthropic-beta': 'oauth-2025-04-20', 'content-type': 'application/json' },
     })
     const limits = res.ok ? parseLive(res.text) : []
+    // The panel's last answer, as read: its status and the parts the bar uses,
+    // kept beside the readings so a figure that looks wrong can be traced.
+    try {
+      const body = res.ok ? JSON.parse(res.text) : null
+      await $.store.set(LIVE_ANSWER, { at: now, status: res.status, parsed: limits,
+        body: body && { five_hour: body.five_hour ?? null, seven_day: body.seven_day ?? null, extra_usage: body.extra_usage ?? null, spend: body.spend ?? null, limits: body.limits ?? null } })
+    } catch { /* only the trace is lost */ }
     if (!limits.length) { live.waitUntil = now + LIVE_BACKOFF; return }
     await adopt($, box, limits, await $.clock.now(), true, true)
-  } catch {
+  } catch (err) {
     live.waitUntil = now + LIVE_BACKOFF // the headers' reading stands meanwhile
+    try { await $.store.set(LIVE_ANSWER, { at: now, error: String((err as any)?.message ?? err).slice(0, 200) }) } catch { /* see above */ }
   } finally {
     live.busy = false
   }
+}
+
+// ---- the plan: Max uses extra-usage credit where other plans have a 5-hour window ----
+// Read from the account profile the app itself reads, with the same handle, and
+// shared through the store; re-read every few hours in case the plan changes.
+export const PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile'
+export const PLAN_EVERY = 6 * 3600_000
+const PLAN = 'plan'
+type Plan = { max: boolean; at: number }
+
+export function parseProfile(text: string): boolean | null {
+  const body = JSON.parse(text)
+  const type = body?.organization?.organization_type
+  if (body?.account?.has_claude_max === true || type === 'claude_max') return true
+  if (typeof body?.account?.has_claude_max === 'boolean' || typeof type === 'string') return false
+  return null
+}
+
+async function planReading($: any) {
+  const now = await $.clock.now()
+  try {
+    const held: any = await $.store.get(PLAN)
+    if (held && typeof held.max === 'boolean' && now - held.at < PLAN_EVERY) return await update($, plan, () => held.max)
+  } catch { /* read it anew */ }
+  try {
+    const auth = await $.session.authorize()
+    if (!auth?.handle) return
+    const res = await $.http.fetch(PROFILE_URL, { auth: auth.handle, headers: { 'content-type': 'application/json' } })
+    const max = res.ok ? parseProfile(res.text) : null
+    if (max == null) return
+    await update($, plan, () => max)
+    try { await $.store.set(PLAN, { max, at: now } satisfies Plan) } catch { /* read again next chat */ }
+  } catch { /* unknown: the bar goes by whether a 5-hour window is reported */ }
 }
 
 export const register: Register = on => {
@@ -441,6 +554,8 @@ export const register: Register = on => {
     // The usage panel's own figure, now and then once a minute among all chats.
     void liveReading($, box, live)
     $.clock.every(15_000, () => void liveReading($, box, live))
+    void planReading($)
+    $.clock.every(PLAN_EVERY, () => void planReading($))
     // Keep reset countdowns moving between API responses.
     $.clock.every(30_000, () => void update($, tick, t => t + 1))
     return result
@@ -504,7 +619,7 @@ export const register: Register = on => {
           const live = (await $.session.usage()).context
           if (Number.isFinite(live?.window)) contextWindow = live.window
           if (Number.isFinite(live?.percent)) {
-            await update($, usage, u => ({ fiveHour: u?.fiveHour ?? null, weekly: u?.weekly ?? null, context: live.percent as number }))
+            await update($, usage, u => ({ fiveHour: u?.fiveHour ?? null, weekly: u?.weekly ?? null, credit: u?.credit ?? null, context: live.percent as number }))
           }
         } catch { /* the end-of-response reading below still lands */ }
         // The limits this request was answered under, as early as they are known.
@@ -519,7 +634,7 @@ export const register: Register = on => {
       : 0
     if (input > 0 && contextWindow != null && contextWindow > 0) {
       const percent = Math.round((input / contextWindow) * 100)
-      await update($, usage, u => ({ fiveHour: u?.fiveHour ?? null, weekly: u?.weekly ?? null, context: percent }))
+      await update($, usage, u => ({ fiveHour: u?.fiveHour ?? null, weekly: u?.weekly ?? null, credit: u?.credit ?? null, context: percent }))
     }
     await ownReading($, box)
     if (e.turnId !== activeTurn) return result
@@ -560,7 +675,7 @@ export const register: Register = on => {
     // from the store: the figures are already there, and waiting for the hooks left
     // a new chat's quota readings at "—" for the first sync tick (5s).
     const held = await read($, usage)
-    const saved = held?.fiveHour || held?.weekly ? null : (await savedReading($)).limits
+    const saved = held?.fiveHour || held?.weekly || held?.credit ? null : (await savedReading($)).limits
     const u = saved?.length ? { ...toUsage(saved, { window: 0 } as SessionContextUsage), context: held?.context ?? null } : held
     const tps = await read($, speed)
     const now = await $.clock.now()
@@ -570,12 +685,25 @@ export const register: Register = on => {
 
     const weekly = windowState(u?.weekly ?? null, now)
     const five = windowState(u?.fiveHour ?? null, now)
+    // Plans without a 5-hour window (Max on credits) show their extra-usage
+    // credit in its place: what is left of the month's limit, and the amount.
+    const credit = u?.credit ?? null
+    const isMax = await read($, plan)
+    const useCredit = isMax ?? (five.remaining == null && credit != null)
+    const creditLeft = credit?.percentUsed != null ? remainingPercent(credit.percentUsed) : null
+    const second = useCredit ? { remaining: creditLeft, resetsAt: null } : five
+    // Credit reads label, bar, amount: no percentage, no countdown. It is
+    // measured as the short amount where 5-hour has its figure and the full one
+    // where 5-hour has its countdown, so it changes size at 5-hour's widths.
+    const secondTexts = useCredit
+      ? [credit ? creditText(credit, true) : '—', credit ? creditText(credit) : '', '']
+      : [percentText(five.remaining), resetText(five.resetsAt, now), resetText(five.resetsAt, now, true)]
     const context = u?.context ?? null
     const speedValue = tps == null ? '—' : `~${tps}`
 
     const level = fitLevel(columns, isTerminal, {
       weekly: [percentText(weekly.remaining), resetText(weekly.resetsAt, now, false, false), resetText(weekly.resetsAt, now, true)],
-      five: [percentText(five.remaining), resetText(five.resetsAt, now), resetText(five.resetsAt, now, true)],
+      five: secondTexts,
       speed: speedValue,
       context: percentText(context),
     })
@@ -587,7 +715,9 @@ export const register: Register = on => {
       reset: L.reset ? resetText(w.resetsAt, now, L.compactReset, withMinutes) : null,
     })
     const wk = quotaParts('Weekly', 'Wk', weekly, false)
-    const fh = quotaParts('5-hour', '5h', five, true)
+    const fh = useCredit
+      ? { label: L.quotaLabels ? (L.shortLabels ? 'Cr' : 'Credit') : '', value: credit ? creditText(credit, L.compactReset || !L.reset) : '—', reset: null }
+      : quotaParts('5-hour', '5h', five, true)
     // Pad Weekly's and 5-hour's texts to equal widths with figure spaces, so the
     // terminal's two tracks come out the same length.
     const valueWidth = Math.max(wk.value.length, fh.value.length)
@@ -603,7 +733,7 @@ export const register: Register = on => {
     // left with a wider gap before its divider than the rest. An odd cell goes to
     // Weekly; one is held back for the ⚡, which the terminal draws two cells wide.
     const natural = rowWidth(L, {
-      weekly: [percentText(weekly.remaining), wk.reset ?? ''], five: [percentText(five.remaining), fh.reset ?? ''], speed: speedValue, context: percentText(context),
+      weekly: [percentText(weekly.remaining), wk.reset ?? ''], five: [useCredit ? fh.value : percentText(second.remaining), fh.reset ?? ''], speed: speedValue, context: percentText(context),
     }, isTerminal)
     const spare = Math.max(0, columns - natural - (L.speed ? 1 : 0))
     const trackWidth = TRACK_BASE + Math.floor(spare / 2)
@@ -675,7 +805,7 @@ export const register: Register = on => {
 
     const readings = [
       quotaReading('weekly', wk, weekly, oddCell),
-      quotaReading('five-hour', fh, five),
+      quotaReading(useCredit ? 'credit' : 'five-hour', fh, second),
       L.speed
         ? reading('speed', false, [
             desktop

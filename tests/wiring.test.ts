@@ -1,7 +1,7 @@
 import { test, expect, mock } from 'claude-code/testing'
 
 import { shown, exactly } from './shown'
-import { repairStore, foldLimits, parseLive, LIVE_URL } from '../hooks/register'
+import { repairStore, foldLimits, parseLive, parseProfile, creditText, LIVE_URL, PROFILE_URL } from '../hooks/register'
 
 // Wiring: every figure comes from the engine's own events, as a session raises them.
 
@@ -340,14 +340,21 @@ test('each response reads the limits and shares them with the other chats', asyn
 
 // The live reading: the usage panel's own figure, from the endpoint the app
 // reads, not the whole-point figure a reply's headers carried.
-function liveUsage(on: any, body: () => unknown, calls: any[] = []) {
+// Answers the usage endpoint with `body` and the profile with `profile` (none: 404).
+// `calls` holds the usage reads only.
+function liveUsage(on: any, body: () => unknown, calls: any[] = [], profile?: unknown) {
   on('session.authorize', () => ({ value: { handle: 'h1', kind: 'bearer' } }))
   on('http.fetch', (_$: any, e: any) => {
+    if (e.url === PROFILE_URL) {
+      return { value: profile ? { status: 200, ok: true, headers: {}, text: JSON.stringify(profile) } : { status: 404, ok: false, headers: {}, text: '' } }
+    }
     calls.push(e)
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body()) } }
   })
   return calls
 }
+const MAX = { account: { has_claude_max: true, has_claude_pro: false }, organization: { organization_type: 'claude_max' } }
+const PRO = { account: { has_claude_max: false, has_claude_pro: true }, organization: { organization_type: 'claude_pro' } }
 
 test('the usage panel figure replaces the headers’ one and is shared, read with the session credential', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
@@ -405,7 +412,7 @@ test('a refused panel read leaves the headers’ figure and waits before trying 
   sharedStore(on)
   const calls: any[] = []
   on('session.authorize', () => ({ value: { handle: 'h1', kind: 'bearer' } }))
-  on('http.fetch', (_$: any, e: any) => { calls.push(e); return { value: { status: 429, ok: false, headers: {}, text: '' } } })
+  on('http.fetch', (_$: any, e: any) => { if (e.url !== PROFILE_URL) calls.push(e); return { value: { status: 429, ok: false, headers: {}, text: '' } } })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [
     { kind: 'seven_day', percentUsed: 43, resetsAt: new Date(clock.now() + HOUR).toISOString() },
@@ -425,4 +432,131 @@ test('folding: same window keeps the higher figure; a new window is taken as it 
     .toEqual([{ kind: 'five_hour', percentUsed: 12.3, resetsAt: '2026-10-29T16:19:59.912Z' }])
   expect(parseLive('{"five_hour":{"utilization":null,"resets_at":null},"seven_day":{"utilization":44,"resets_at":null}}'))
     .toEqual([{ kind: 'seven_day', percentUsed: 44 }])
+})
+
+// Plans without a 5-hour window show their extra-usage credit in its place.
+const credit = { is_enabled: true, monthly_limit: 5000, used_credits: 1240, utilization: 24.8, currency: 'usd' }
+
+test('plan unknown and no 5-hour window: the credit takes its slot, as label, bar and amount', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  sharedStore(on)
+  const resets = new Date(clock.now() + 4 * 24 * HOUR).toISOString()
+  liveUsage(on, () => ({ five_hour: null, seven_day: { utilization: 97, resets_at: resets }, extra_usage: credit }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [] } }))
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const mount = () => $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) })
+  let words = await shown(await mount())
+  expect(exactly(words, 'Credit')).toBe(1)
+  expect(exactly(words, '$37.60')).toBe(1)     // 50.00 − 12.40 left
+  expect(exactly(words, '75%')).toBe(0)        // no percentage: the bar shows it
+  expect((await (await mount()).findAll({ type: 'Svg' })).some((x: any) => /75%? left|75% left/.test(String(x.props?.alt)))).toBe(true)
+  expect(exactly(words, '5-hour')).toBe(0)
+  // A later reply's headers have no credit in them: the panel's stays.
+  await $.session.measure({ context: { window: 200_000 }, changed: ['rateLimits'], rateLimits: [
+    { kind: 'seven_day', percentUsed: 97, resetsAt: resets },
+  ] })
+  words = await shown(await mount())
+  expect(exactly(words, '$37.60')).toBe(1)
+})
+
+test('a 5-hour window, when the plan has one, keeps its slot over the credit', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  sharedStore(on)
+  const soon = new Date(clock.now() + 2 * HOUR).toISOString()
+  liveUsage(on, () => ({ five_hour: { utilization: 40, resets_at: soon }, seven_day: { utilization: 10, resets_at: soon }, extra_usage: credit }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [] } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const words = await shown(await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) }))
+  expect(exactly(words, '5-hour')).toBe(1)
+  expect(exactly(words, 'Credit')).toBe(0)
+})
+
+test('credit amounts: left of the limit, compact drops cents, no limit shows what is used', () => {
+  const c = parseLive(JSON.stringify({ extra_usage: credit })).find(l => l.kind === 'credit') as any
+  expect(c).toMatchObject({ percentUsed: 24.8, used: 1240, limit: 5000, currency: 'USD' })
+  expect(creditText({ percentUsed: 24.8, used: 1240, limit: 5000, currency: 'USD' })).toBe('$37.60')
+  expect(creditText({ percentUsed: 24.8, used: 1240, limit: 5000, currency: 'USD' }, true)).toBe('$38')
+  expect(creditText({ percentUsed: null, used: 1240, limit: null, currency: 'MYR' })).toBe('MYR 12.40 used')
+  expect(parseLive(JSON.stringify({ extra_usage: { is_enabled: false, monthly_limit: null, used_credits: null, utilization: null } }))[0]).toMatchObject({ kind: 'credit', off: true })
+})
+
+test('Max: credit replaces the 5-hour reading even while one is reported', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const db = sharedStore(on)
+  const soon = new Date(clock.now() + 2 * HOUR).toISOString()
+  liveUsage(on, () => ({ five_hour: { utilization: 40, resets_at: soon }, seven_day: { utilization: 10, resets_at: soon }, extra_usage: credit }), [], MAX)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [] } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const words = await shown(await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) }))
+  expect(exactly(words, 'Credit')).toBe(1)
+  expect(exactly(words, '$37.60')).toBe(1)
+  expect(exactly(words, '5-hour')).toBe(0)
+  expect((db.plan as any).max).toBe(true)
+})
+
+test('Pro: the 5-hour reading stays, and another chat reuses the saved plan', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  sharedStore(on, { plan: { max: false, at: 1_000_000 - HOUR } })
+  const soon = new Date(clock.now() + 2 * HOUR).toISOString()
+  let profileReads = 0
+  on('session.authorize', () => ({ value: { handle: 'h1', kind: 'bearer' } }))
+  on('http.fetch', (_$: any, e: any) => {
+    if (e.url === PROFILE_URL) profileReads++
+    const body = e.url === PROFILE_URL ? PRO : { five_hour: null, seven_day: { utilization: 10, resets_at: soon }, extra_usage: credit }
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
+  })
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [] } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const words = await shown(await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) }))
+  expect(exactly(words, '5-hour')).toBe(1)     // no window reported: "—", not credit
+  expect(exactly(words, 'Credit')).toBe(0)
+  expect(profileReads).toBe(0)
+})
+
+test('the profile says Max, not Max, or nothing', () => {
+  expect(parseProfile(JSON.stringify(MAX))).toBe(true)
+  expect(parseProfile(JSON.stringify({ organization: { organization_type: 'claude_max' } }))).toBe(true)
+  expect(parseProfile(JSON.stringify(PRO))).toBe(false)
+  expect(parseProfile('{}')).toBe(null)
+})
+
+test('credit from the newer spend object: balance, else limit less used, in its own units', () => {
+  const spend = (x: object) => parseLive(JSON.stringify({ spend: x, extra_usage: { is_enabled: false, monthly_limit: null, used_credits: null, utilization: null } })).find(l => l.kind === 'credit') as any
+  const usd = (n: number) => ({ amount_minor: n, currency: 'USD', exponent: 2 })
+  // Off, nothing bought: a reading that says so, "Off", rather than none.
+  const off = spend({ used: usd(0), limit: null, percent: 0, enabled: false, balance: null })
+  expect(off.off).toBe(true)
+  expect(creditText(off)).toBe('Off')
+  const capped = spend({ used: usd(1240), limit: usd(5000), percent: 24.8, enabled: true, balance: null })
+  expect(capped).toMatchObject({ percentUsed: 24.8, used: 1240, limit: 5000, currency: 'USD' })
+  expect(creditText(capped)).toBe('$37.60')
+  const bought = spend({ used: usd(300), limit: null, percent: 0, enabled: true, balance: usd(2050) })
+  expect(creditText(bought)).toBe('$20.50')
+  expect(bought.percentUsed).toBe(null)
+})
+
+test('Max with credit switched off: the slot says Off, not —', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  sharedStore(on, { plan: { max: true, at: 1_000_000 } })
+  const soon = new Date(clock.now() + 2 * HOUR).toISOString()
+  liveUsage(on, () => ({ five_hour: null, seven_day: { utilization: 97, resets_at: soon },
+    extra_usage: { is_enabled: false, monthly_limit: null, used_credits: null, utilization: null },
+    spend: { used: { amount_minor: 0, currency: 'USD', exponent: 2 }, limit: null, percent: 0, enabled: false, balance: null } }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [] } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const words = await shown(await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) }))
+  expect(exactly(words, 'Credit')).toBe(1)
+  expect(exactly(words, 'Off')).toBe(1)
+  expect(exactly(words, '3%')).toBe(1)
 })

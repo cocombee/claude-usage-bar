@@ -5,7 +5,7 @@
     {
       "name": "usage-bar",
       "source": "./",
-      "description": "5-hour usage, weekly usage, token speed and context in one row above the prompt"
+      "description": "Weekly usage, 5-hour usage or credit, token speed and context in one row above the prompt"
     }
   ]
 }
