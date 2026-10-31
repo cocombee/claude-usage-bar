@@ -44,18 +44,14 @@ export function resetText(resetsAtMs: number | null, now: number, compact = fals
   return days ? `${days}d ${hours}h` : hours ? (withMinutes ? `${hours}h ${mins}m` : `${hours}h`) : `${minutes}m`
 }
 
-// Credit's amount: the balance left, else what is left of the limit, else what
-// is used where the plan sets none. Compact drops the cents.
-export function creditText(c: Credit, compact = false) {
-  if (c.off) return 'Off'
-  const left = c.balance ?? (c.limit != null && c.used != null ? Math.max(0, c.limit - c.used) : null)
-  const minor = left ?? c.used
-  if (minor == null) return '—'
-  const exponent = c.exponent ?? 2
-  const major = minor / 10 ** exponent
+// Credit's amount: the balance, else what is left of the limit, else $0 (credit
+// off or none bought), in whole units with thousands commas: no cents, rounded
+// down so it never shows more than is there.
+export function creditText(c: Credit) {
+  const left = c.balance ?? (c.limit != null && c.used != null ? Math.max(0, c.limit - c.used) : 0)
   const symbol = c.currency === 'USD' ? '$' : `${c.currency} `
-  const amount = compact ? `${symbol}${Math.round(major)}` : `${symbol}${major.toFixed(exponent)}`
-  return left == null ? `${amount} used` : amount
+  const whole = String(Math.floor(left / 10 ** (c.exponent ?? 2))).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  return `${symbol}${whole}`
 }
 
 export type Tone = 'normal' | 'warning' | 'low'
@@ -74,13 +70,13 @@ function pickWindow(limits: readonly SessionRateLimit[], kind: string): Window |
 
 // A reading's credit entry: the usage panel's extra usage (kind `credit`, with
 // its amounts), else a gateway's `spend_limit` from the headers (a percentage).
-type CreditLimit = SessionRateLimit & { used?: number | null; limit?: number | null; balance?: number | null; exponent?: number; currency?: string; off?: boolean }
+type CreditLimit = SessionRateLimit & { used?: number | null; limit?: number | null; balance?: number | null; exponent?: number; currency?: string }
 const finite = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) ? n : null)
 function pickCredit(limits: readonly SessionRateLimit[]): Credit | null {
   const c = (limits.find(l => l.kind === 'credit') ?? limits.find(l => l.kind === 'spend_limit')) as CreditLimit | undefined
   if (!c) return null
-  const credit = { percentUsed: finite(c.percentUsed), used: finite(c.used), limit: finite(c.limit), balance: finite(c.balance), exponent: finite(c.exponent) ?? 2, currency: c.currency ?? 'USD', ...(c.off ? { off: true } : {}) }
-  return !credit.off && credit.percentUsed == null && credit.used == null && credit.balance == null ? null : credit
+  const credit = { percentUsed: finite(c.percentUsed), used: finite(c.used), limit: finite(c.limit), balance: finite(c.balance), exponent: finite(c.exponent) ?? 2, currency: c.currency ?? 'USD' }
+  return credit.percentUsed == null && credit.used == null && credit.balance == null ? null : credit
 }
 
 export function toUsage(limits: readonly SessionRateLimit[], context: SessionContextUsage): Usage {
@@ -347,14 +343,18 @@ const sameWindow = (a: SessionRateLimit, b: SessionRateLimit) => {
 // whole points, so they run up to a point under the app's own panel. Within one
 // window usage only grows: a header reading never pulls a figure back below the
 // higher one already held. A new window (a later reset time) is taken as it is.
-// Credit comes only from the panel, so a header reading keeps the one held.
+// Credit comes only from the panel as this version reads it, so a reading
+// without one (a reply's headers, or a chat still on an older version) keeps the
+// one held.
+export function keepCredit(held: readonly SessionRateLimit[], incoming: readonly SessionRateLimit[]) {
+  const credit = held.find(h => h.kind === 'credit')
+  return credit && !incoming.some(l => l.kind === 'credit') ? [...incoming, credit] : incoming
+}
 export function foldLimits(held: readonly SessionRateLimit[], incoming: readonly SessionRateLimit[]) {
-  const folded = incoming.map(l => {
+  return keepCredit(held, incoming.map(l => {
     const prev = held.find(h => sameWindow(h, l))
     return prev && prev.percentUsed > l.percentUsed ? { ...l, percentUsed: prev.percentUsed } : l
-  })
-  const credit = held.find(h => h.kind === 'credit')
-  return credit && !folded.some(l => l.kind === 'credit') ? [...folded, credit] : folded
+  }))
 }
 
 // Shows `limits` (keeping Context as it is) and, for a reading of this chat's
@@ -362,7 +362,7 @@ export function foldLimits(held: readonly SessionRateLimit[], incoming: readonly
 // replaces what is held; any other is folded into it.
 async function adopt($: any, box: Shown, limits: readonly SessionRateLimit[], at: number, save: boolean, live = false) {
   if (!limits.length) return
-  if (!live) limits = foldLimits(box.current.limits, limits)
+  limits = live ? keepCredit(box.current.limits, limits) : foldLimits(box.current.limits, limits)
   box.current = { at, limits, live }
   await draw($, box, limits)
   if (save) await saveReading($, { at, limits, live })
@@ -387,7 +387,9 @@ export const LIVE_EVERY = 60_000
 export const LIVE_BACKOFF = 5 * 60_000
 // When any chat last read it, shared so several open chats read it once a minute
 // between them; the others take the reading from the store on their sync tick.
-const LIVE_AT = 'liveReadAt'
+// Versioned: chats on a version before credit read the panel without it, and
+// must not hold back a chat that reads it whole.
+const LIVE_AT = 'liveReadAtV2'
 const LIVE_ANSWER = 'liveAnswer'
 
 // Usage credit, from the newer `spend` object (amounts as { amount_minor,
@@ -411,8 +413,11 @@ function parseCredit(body: any): CreditLimit | null {
         exponent: unit?.exponent ?? 2, currency: (unit?.currency ?? 'USD').toUpperCase(),
       }
     }
-    // Switched off with nothing bought: a reading of its own, "Off", not "—".
-    if (sp.enabled === false) return { kind: 'credit', percentUsed: null as unknown as number, used: null, limit: null, off: true }
+    // Switched off with nothing bought: a balance of nothing, shown as $0.
+    if (sp.enabled === false) {
+      return { kind: 'credit', percentUsed: null as unknown as number, used: used?.minor ?? null, limit: null, balance: 0,
+        exponent: used?.exponent ?? 2, currency: (used?.currency ?? 'USD').toUpperCase() }
+    }
   }
   const x = body?.extra_usage
   if (x && (finite(x.utilization) != null || finite(x.used_credits) != null)) {
@@ -424,7 +429,7 @@ function parseCredit(body: any): CreditLimit | null {
       currency: typeof x.currency === 'string' ? x.currency.toUpperCase() : 'USD',
     }
   }
-  if (x && x.is_enabled === false) return { kind: 'credit', percentUsed: null as unknown as number, used: null, limit: null, off: true }
+  if (x && x.is_enabled === false) return { kind: 'credit', percentUsed: null as unknown as number, used: null, limit: null, balance: 0, currency: 'USD' }
   return null
 }
 
@@ -693,10 +698,10 @@ export const register: Register = on => {
     const creditLeft = credit?.percentUsed != null ? remainingPercent(credit.percentUsed) : null
     const second = useCredit ? { remaining: creditLeft, resetsAt: null } : five
     // Credit reads label, bar, amount: no percentage, no countdown. It is
-    // measured as the short amount where 5-hour has its figure and the full one
-    // where 5-hour has its countdown, so it changes size at 5-hour's widths.
+    // measured as 5-hour's own texts, so it keeps 5-hour's width and sizes;
+    // a longer amount takes its room from the bar (see below).
     const secondTexts = useCredit
-      ? [credit ? creditText(credit, true) : '—', credit ? creditText(credit) : '', '']
+      ? ['99%', '4h 28m', '4h']
       : [percentText(five.remaining), resetText(five.resetsAt, now), resetText(five.resetsAt, now, true)]
     const context = u?.context ?? null
     const speedValue = tps == null ? '—' : `~${tps}`
@@ -716,11 +721,19 @@ export const register: Register = on => {
     })
     const wk = quotaParts('Weekly', 'Wk', weekly, false)
     const fh = useCredit
-      ? { label: L.quotaLabels ? (L.shortLabels ? 'Cr' : 'Credit') : '', value: credit ? creditText(credit, L.compactReset || !L.reset) : '—', reset: null }
+      ? { label: L.quotaLabels ? (L.shortLabels ? 'Cr' : 'Credit') : '', value: credit ? creditText(credit) : '—', reset: null }
       : quotaParts('5-hour', '5h', five, true)
+    // Room for a credit amount longer than 5-hour's figure. Where a countdown
+    // would sit there is room enough, and a track gives way by itself; where
+    // there is none, the meter goes first, then the label.
+    const textCells = (t: string) => Math.ceil((isTerminal ? 1 : DESKTOP_TEXT) * t.length)
+    let creditOver = useCredit && !L.reset ? textCells(fh.value) - textCells('99%') : 0
+    const creditMeter = creditOver <= 0
+    if (!creditMeter) creditOver -= (desktop && L.ring ? RING_CELLS : TRACK_BASE) + 1
+    if (creditOver > 0 && fh.label) fh.label = ''
     // Pad Weekly's and 5-hour's texts to equal widths with figure spaces, so the
     // terminal's two tracks come out the same length.
-    const valueWidth = Math.max(wk.value.length, fh.value.length)
+    const valueWidth = useCredit ? wk.value.length : Math.max(wk.value.length, fh.value.length)
     wk.value = wk.value.padStart(valueWidth, FIGURE_SPACE)
     fh.value = fh.value.padStart(valueWidth, FIGURE_SPACE)
     if (wk.reset != null && fh.reset != null) {
@@ -795,17 +808,17 @@ export const register: Register = on => {
     const part = (child: any) => <Box flexShrink={0}>{child}</Box>
     const figure = (text: string, tone: Tone) =>
       part(<Text color={tone === 'normal' ? undefined : toneColor(tone)}>{shown(text)}</Text>)
-    const quotaReading = (key: string, p: typeof wk, w: ReturnType<typeof windowState>, extra = 0) =>
+    const quotaReading = (key: string, p: typeof wk, w: ReturnType<typeof windowState>, extra = 0, withMeter = true) =>
       reading(key, !(desktop && L.ring), [
         ...(p.label ? [part(<Text color="inactive">{shown(p.label)}</Text>)] : []),
-        meter(w.remaining, extra),
+        ...(withMeter ? [meter(w.remaining, extra)] : []),
         figure(p.value, quotaTone(w.remaining)),
         ...(p.reset == null ? [] : [part(<Text color="inactive">{shown(p.reset)}</Text>)]),
       ])
 
     const readings = [
       quotaReading('weekly', wk, weekly, oddCell),
-      quotaReading(useCredit ? 'credit' : 'five-hour', fh, second),
+      quotaReading(useCredit ? 'credit' : 'five-hour', fh, second, 0, creditMeter),
       L.speed
         ? reading('speed', false, [
             desktop

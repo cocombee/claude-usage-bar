@@ -396,7 +396,7 @@ test('a later reply’s headers never pull the figure back below the panel’s',
 
 test('several open chats read the panel once a minute between them', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
-  sharedStore(on, { liveReadAt: 1_000_000 - 10_000 })   // another chat read it 10s ago
+  sharedStore(on, { liveReadAtV2: 1_000_000 - 10_000 })   // another chat read it 10s ago
   const calls = liveUsage(on, () => ({ seven_day: { utilization: 44, resets_at: null } }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [] } }))
@@ -450,7 +450,7 @@ test('plan unknown and no 5-hour window: the credit takes its slot, as label, ba
   const mount = () => $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) })
   let words = await shown(await mount())
   expect(exactly(words, 'Credit')).toBe(1)
-  expect(exactly(words, '$37.60')).toBe(1)     // 50.00 − 12.40 left
+  expect(exactly(words, '$37')).toBe(1)     // 50.00 − 12.40 = 37.60 left, no cents
   expect(exactly(words, '75%')).toBe(0)        // no percentage: the bar shows it
   expect((await (await mount()).findAll({ type: 'Svg' })).some((x: any) => /75%? left|75% left/.test(String(x.props?.alt)))).toBe(true)
   expect(exactly(words, '5-hour')).toBe(0)
@@ -459,7 +459,7 @@ test('plan unknown and no 5-hour window: the credit takes its slot, as label, ba
     { kind: 'seven_day', percentUsed: 97, resetsAt: resets },
   ] })
   words = await shown(await mount())
-  expect(exactly(words, '$37.60')).toBe(1)
+  expect(exactly(words, '$37')).toBe(1)
 })
 
 test('a 5-hour window, when the plan has one, keeps its slot over the credit', async ($, on) => {
@@ -476,13 +476,13 @@ test('a 5-hour window, when the plan has one, keeps its slot over the credit', a
   expect(exactly(words, 'Credit')).toBe(0)
 })
 
-test('credit amounts: left of the limit, compact drops cents, no limit shows what is used', () => {
+test('credit amounts: the balance or what is left of the limit, whole units, never more than there is', () => {
   const c = parseLive(JSON.stringify({ extra_usage: credit })).find(l => l.kind === 'credit') as any
   expect(c).toMatchObject({ percentUsed: 24.8, used: 1240, limit: 5000, currency: 'USD' })
-  expect(creditText({ percentUsed: 24.8, used: 1240, limit: 5000, currency: 'USD' })).toBe('$37.60')
-  expect(creditText({ percentUsed: 24.8, used: 1240, limit: 5000, currency: 'USD' }, true)).toBe('$38')
-  expect(creditText({ percentUsed: null, used: 1240, limit: null, currency: 'MYR' })).toBe('MYR 12.40 used')
-  expect(parseLive(JSON.stringify({ extra_usage: { is_enabled: false, monthly_limit: null, used_credits: null, utilization: null } }))[0]).toMatchObject({ kind: 'credit', off: true })
+  expect(creditText({ percentUsed: 24.8, used: 1240, limit: 5000, currency: 'USD' })).toBe('$37')   // 37.60 left, cents dropped
+  expect(creditText({ percentUsed: null, used: 1240, limit: null, currency: 'MYR' })).toBe('MYR 0')  // no balance, no limit
+  expect(creditText({ percentUsed: null, used: null, limit: null, balance: 125037, currency: 'USD' })).toBe('$1,250')
+  expect(parseLive(JSON.stringify({ extra_usage: { is_enabled: false, monthly_limit: null, used_credits: null, utilization: null } }))[0]).toMatchObject({ kind: 'credit', balance: 0 })
 })
 
 test('Max: credit replaces the 5-hour reading even while one is reported', async ($, on) => {
@@ -496,7 +496,7 @@ test('Max: credit replaces the 5-hour reading even while one is reported', async
   await clock.advance(1)
   const words = await shown(await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) }))
   expect(exactly(words, 'Credit')).toBe(1)
-  expect(exactly(words, '$37.60')).toBe(1)
+  expect(exactly(words, '$37')).toBe(1)
   expect(exactly(words, '5-hour')).toBe(0)
   expect((db.plan as any).max).toBe(true)
 })
@@ -532,19 +532,19 @@ test('the profile says Max, not Max, or nothing', () => {
 test('credit from the newer spend object: balance, else limit less used, in its own units', () => {
   const spend = (x: object) => parseLive(JSON.stringify({ spend: x, extra_usage: { is_enabled: false, monthly_limit: null, used_credits: null, utilization: null } })).find(l => l.kind === 'credit') as any
   const usd = (n: number) => ({ amount_minor: n, currency: 'USD', exponent: 2 })
-  // Off, nothing bought: a reading that says so, "Off", rather than none.
+  // Off, nothing bought: a balance of $0, not a blank.
   const off = spend({ used: usd(0), limit: null, percent: 0, enabled: false, balance: null })
-  expect(off.off).toBe(true)
-  expect(creditText(off)).toBe('Off')
+  expect(off.balance).toBe(0)
+  expect(creditText(off)).toBe('$0')
   const capped = spend({ used: usd(1240), limit: usd(5000), percent: 24.8, enabled: true, balance: null })
   expect(capped).toMatchObject({ percentUsed: 24.8, used: 1240, limit: 5000, currency: 'USD' })
-  expect(creditText(capped)).toBe('$37.60')
+  expect(creditText(capped)).toBe('$37')
   const bought = spend({ used: usd(300), limit: null, percent: 0, enabled: true, balance: usd(2050) })
-  expect(creditText(bought)).toBe('$20.50')
+  expect(creditText(bought)).toBe('$20')
   expect(bought.percentUsed).toBe(null)
 })
 
-test('Max with credit switched off: the slot says Off, not —', async ($, on) => {
+test('Max with credit switched off: the slot shows the $0 balance, not —', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   sharedStore(on, { plan: { max: true, at: 1_000_000 } })
   const soon = new Date(clock.now() + 2 * HOUR).toISOString()
@@ -557,6 +557,51 @@ test('Max with credit switched off: the slot says Off, not —', async ($, on) =
   await clock.advance(1)
   const words = await shown(await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) }))
   expect(exactly(words, 'Credit')).toBe(1)
-  expect(exactly(words, 'Off')).toBe(1)
+  expect(exactly(words, '$0')).toBe(1)
   expect(exactly(words, '3%')).toBe(1)
+})
+
+test('a live reading from a chat on an older version, without credit, keeps the credit held', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const db = sharedStore(on, { plan: { max: true, at: 1_000_000 }, liveReadAt: 1_000_000 - 5_000 })
+  const soon = new Date(clock.now() + 2 * HOUR).toISOString()
+  const calls = liveUsage(on, () => ({ five_hour: null, seven_day: { utilization: 97, resets_at: soon }, extra_usage: credit }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [] } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  expect(calls.length).toBe(1)                  // the older chats' read time does not hold it back
+  db.latestRateLimits = { at: clock.now() + 1000, live: true, limits: [{ kind: 'seven_day', percentUsed: 97, resetsAt: soon }] }
+  await clock.advance(6_000)
+  const words = await shown(await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) }))
+  expect(exactly(words, '$37')).toBe(1)
+})
+
+test('a long credit balance keeps 5-hour\'s width: the ring goes first, then the label', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  sharedStore(on, { plan: { max: true, at: 1_000_000 } })
+  const soon = new Date(clock.now() + 2 * HOUR).toISOString()
+  const usd = (n: number) => ({ amount_minor: n, currency: 'USD', exponent: 2 })
+  liveUsage(on, () => ({ five_hour: null, seven_day: { utilization: 15, resets_at: soon },
+    spend: { used: usd(0), limit: null, percent: 0, enabled: true, balance: usd(1234500) } }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [] } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const at = async (cols: number) => {
+    const ui = await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(cols) })
+    const rings = (await ui.findAll({ type: 'Svg' })).filter((x: any) => String(x.props?.source).includes('<circle')).length
+    return { words: await shown(ui), rings }
+  }
+  // The same sizes as 5-hour: XL from 68 columns keeps full labels' short form and countdowns.
+  const xl = await at(68)
+  expect(exactly(xl.words, 'Cr')).toBe(1)
+  expect(exactly(xl.words, '$12,345')).toBe(1)
+  expect(exactly(xl.words, '5d')).toBe(0)
+  // M (rings): "$12,345" is 3 cells wider than "99%": its ring goes, and then its label.
+  const m = await at(51)
+  expect(exactly(m.words, 'Wk')).toBe(1)
+  expect(exactly(m.words, 'Cr')).toBe(0)
+  expect(exactly(m.words, '$12,345')).toBe(1)
+  expect(m.rings).toBe(1)                       // Weekly's ring only
 })

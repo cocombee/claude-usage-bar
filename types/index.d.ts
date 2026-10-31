@@ -3,8 +3,7 @@ export type Window = { percentUsed: number; resetsAt?: string }
 // month's limit (0–100, null with no limit), and the amounts in minor units.
 // `balance`: credit bought and not yet spent, where the plan reports one. Amounts
 // are in units of 10^-exponent of `currency` (cents for USD).
-// `off`: the account reports credit switched off, with none bought.
-export type Credit = { percentUsed: number | null; used: number | null; limit: number | null; balance?: number | null; exponent?: number; currency: string; off?: boolean }
+export type Credit = { percentUsed: number | null; used: number | null; limit: number | null; balance?: number | null; exponent?: number; currency: string }
 export type Usage = { fiveHour: Window | null; weekly: Window | null; credit: Credit | null; context: number | null }
 
 declare module 'claude-code' {
