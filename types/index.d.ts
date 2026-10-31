@@ -1,9 +1,8 @@
 export type Window = { percentUsed: number; resetsAt?: string }
-// Extra-usage credit for plans without a 5-hour window: what is used of the
-// month's limit (0–100, null with no limit), and the amounts in minor units.
-// `balance`: credit bought and not yet spent, where the plan reports one. Amounts
-// are in units of 10^-exponent of `currency` (cents for USD).
-export type Credit = { percentUsed: number | null; used: number | null; limit: number | null; balance?: number | null; exponent?: number; currency: string }
+// Credit for plans without a 5-hour window, every open source added up (promo
+// credit, Claude Code and Cowork credit, bought credit): what is left and, where
+// every source has one, their limits together; in whole currency units.
+export type Credit = { left: number; limit: number | null; currency: string }
 export type Usage = { fiveHour: Window | null; weekly: Window | null; credit: Credit | null; context: number | null }
 
 declare module 'claude-code' {

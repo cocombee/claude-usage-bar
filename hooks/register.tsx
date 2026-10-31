@@ -44,15 +44,15 @@ export function resetText(resetsAtMs: number | null, now: number, compact = fals
   return days ? `${days}d ${hours}h` : hours ? (withMinutes ? `${hours}h ${mins}m` : `${hours}h`) : `${minutes}m`
 }
 
-// Credit's amount: the balance, else what is left of the limit, else $0 (credit
-// off or none bought), in whole units with thousands commas: no cents, rounded
-// down so it never shows more than is there.
+// Credit's amount: what is left, in whole units with thousands commas: no
+// cents, rounded down so it never shows more than is there. $0 with none.
 export function creditText(c: Credit) {
-  const left = c.balance ?? (c.limit != null && c.used != null ? Math.max(0, c.limit - c.used) : 0)
   const symbol = c.currency === 'USD' ? '$' : `${c.currency} `
-  const whole = String(Math.floor(left / 10 ** (c.exponent ?? 2))).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
-  return `${symbol}${whole}`
+  return `${symbol}${String(Math.floor(Math.max(0, c.left))).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
 }
+// What is left as a share of the limits, for the track; null with no limit.
+export const creditRemaining = (c: Credit | null) =>
+  c && c.limit != null && c.limit > 0 ? clampPercent((c.left / c.limit) * 100) : null
 
 export type Tone = 'normal' | 'warning' | 'low'
 export function quotaTone(remaining: number | null): Tone {
@@ -70,13 +70,16 @@ function pickWindow(limits: readonly SessionRateLimit[], kind: string): Window |
 
 // A reading's credit entry: the usage panel's extra usage (kind `credit`, with
 // its amounts), else a gateway's `spend_limit` from the headers (a percentage).
-type CreditLimit = SessionRateLimit & { used?: number | null; limit?: number | null; balance?: number | null; exponent?: number; currency?: string }
+// The credit entry's kind. Renamed with its shape, so an entry older chats save
+// in an earlier shape neither shows nor overwrites this one.
+const CREDIT = 'credit_all'
+type CreditLimit = SessionRateLimit & { left?: number; limit?: number | null; currency?: string }
 const finite = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) ? n : null)
 function pickCredit(limits: readonly SessionRateLimit[]): Credit | null {
-  const c = (limits.find(l => l.kind === 'credit') ?? limits.find(l => l.kind === 'spend_limit')) as CreditLimit | undefined
-  if (!c) return null
-  const credit = { percentUsed: finite(c.percentUsed), used: finite(c.used), limit: finite(c.limit), balance: finite(c.balance), exponent: finite(c.exponent) ?? 2, currency: c.currency ?? 'USD' }
-  return credit.percentUsed == null && credit.used == null && credit.balance == null ? null : credit
+  const c = limits.find(l => l.kind === CREDIT) as CreditLimit | undefined
+  // An entry saved by an earlier version, in another shape, waits for a new read.
+  if (!c || finite(c.left) == null) return null
+  return { left: c.left as number, limit: finite(c.limit), currency: c.currency ?? 'USD' }
 }
 
 export function toUsage(limits: readonly SessionRateLimit[], context: SessionContextUsage): Usage {
@@ -347,8 +350,8 @@ const sameWindow = (a: SessionRateLimit, b: SessionRateLimit) => {
 // without one (a reply's headers, or a chat still on an older version) keeps the
 // one held.
 export function keepCredit(held: readonly SessionRateLimit[], incoming: readonly SessionRateLimit[]) {
-  const credit = held.find(h => h.kind === 'credit')
-  return credit && !incoming.some(l => l.kind === 'credit') ? [...incoming, credit] : incoming
+  const credit = held.find(h => h.kind === CREDIT)
+  return credit && !incoming.some(l => l.kind === CREDIT) ? [...incoming, credit] : incoming
 }
 export function foldLimits(held: readonly SessionRateLimit[], incoming: readonly SessionRateLimit[]) {
   return keepCredit(held, incoming.map(l => {
@@ -389,51 +392,66 @@ export const LIVE_BACKOFF = 5 * 60_000
 // between them; the others take the reading from the store on their sync tick.
 // Versioned: chats on a version before credit read the panel without it, and
 // must not hold back a chat that reads it whole.
-const LIVE_AT = 'liveReadAtV2'
+const LIVE_AT = 'liveReadAtV3'
 const LIVE_ANSWER = 'liveAnswer'
 
-// Usage credit, from the newer `spend` object (amounts as { amount_minor,
-// currency, exponent }) where credit is on, else the older `extra_usage`.
-function money(m: any): { minor: number; currency?: string; exponent?: number } | null {
-  if (finite(m) != null) return { minor: m }
+// Credit, from every source the usage panel lists, added up:
+// - dollar windows (promo credit, `wattle_ember`; Claude Code and Cowork credit,
+//   `cinder_cove`; any other with `*_dollars`), until they end;
+// - bought credit: the newer `spend` object (amounts as { amount_minor, currency,
+//   exponent }), else the older `extra_usage` (minor units, `decimal_places`).
+// None at all is a balance of $0, never a blank.
+function money(m: any): { major: number; currency?: string } | null {
+  if (finite(m) != null) return { major: m / 100 }
   return m && finite(m.amount_minor) != null
-    ? { minor: m.amount_minor, currency: typeof m.currency === 'string' ? m.currency : undefined, exponent: finite(m.exponent) ?? undefined }
+    ? { major: m.amount_minor / 10 ** (finite(m.exponent) ?? 2), currency: typeof m.currency === 'string' ? m.currency : undefined }
     : null
 }
-function parseCredit(body: any): CreditLimit | null {
+export type Part = { left: number; limit: number | null; currency: string }
+function dollarWindows(body: any, now: number): Part[] {
+  const parts: Part[] = []
+  for (const w of Object.values(body ?? {}) as any[]) {
+    if (!w || typeof w !== 'object' || Array.isArray(w)) continue
+    const limit = finite(w.limit_dollars), used = finite(w.used_dollars), remaining = finite(w.remaining_dollars)
+    if (remaining == null && limit == null) continue
+    const ends = typeof w.resets_at === 'string' ? Date.parse(w.resets_at) : NaN
+    if (Number.isFinite(ends) && ends <= now) continue
+    parts.push({ left: remaining ?? Math.max(0, (limit as number) - (used ?? 0)), limit, currency: 'USD' })
+  }
+  return parts
+}
+function boughtCredit(body: any): Part | null {
   const sp = body?.spend
-  if (sp) {
+  if (sp && typeof sp === 'object') {
     const used = money(sp.used), limit = money(sp.limit) ?? money(sp.cap), balance = money(sp.balance)
-    if (sp.enabled === true || limit || balance) {
-      const unit = balance ?? limit ?? used
-      return {
-        kind: 'credit',
-        percentUsed: (limit && finite(sp.percent) != null ? Math.round(sp.percent * 10) / 10 : null) as unknown as number,
-        used: used?.minor ?? null, limit: limit?.minor ?? null, balance: balance?.minor ?? null,
-        exponent: unit?.exponent ?? 2, currency: (unit?.currency ?? 'USD').toUpperCase(),
-      }
-    }
-    // Switched off with nothing bought: a balance of nothing, shown as $0.
-    if (sp.enabled === false) {
-      return { kind: 'credit', percentUsed: null as unknown as number, used: used?.minor ?? null, limit: null, balance: 0,
-        exponent: used?.exponent ?? 2, currency: (used?.currency ?? 'USD').toUpperCase() }
-    }
+    const currency = (balance?.currency ?? limit?.currency ?? used?.currency ?? 'USD').toUpperCase()
+    if (balance) return { left: balance.major, limit: limit?.major ?? null, currency }
+    if (limit) return { left: Math.max(0, limit.major - (used?.major ?? 0)), limit: limit.major, currency }
+    return null
   }
   const x = body?.extra_usage
-  if (x && (finite(x.utilization) != null || finite(x.used_credits) != null)) {
-    return {
-      kind: 'credit',
-      percentUsed: (finite(x.utilization) == null ? null : Math.round(x.utilization * 10) / 10) as unknown as number,
-      used: finite(x.used_credits), limit: finite(x.monthly_limit),
-      exponent: finite(x.decimal_places) ?? 2,
-      currency: typeof x.currency === 'string' ? x.currency.toUpperCase() : 'USD',
-    }
+  if (x?.is_enabled === true && finite(x.monthly_limit) != null) {
+    const unit = 10 ** (finite(x.decimal_places) ?? 2)
+    const limit = (x.monthly_limit as number) / unit
+    return { left: Math.max(0, limit - (finite(x.used_credits) ?? 0) / unit), limit, currency: typeof x.currency === 'string' ? x.currency.toUpperCase() : 'USD' }
   }
-  if (x && x.is_enabled === false) return { kind: 'credit', percentUsed: null as unknown as number, used: null, limit: null, balance: 0, currency: 'USD' }
   return null
 }
+export function parseCredit(body: any, now = Date.now(), extra: readonly Part[] = []): CreditLimit | null {
+  if (!body || typeof body !== 'object') return null
+  const parts = [...dollarWindows(body, now), boughtCredit(body), ...extra].filter((p): p is Part => p != null)
+  const currency = parts[0]?.currency ?? 'USD'
+  const same = parts.filter(p => p.currency === currency)
+  return {
+    kind: CREDIT,
+    percentUsed: null as unknown as number,
+    left: Math.round(same.reduce((sum, p) => sum + p.left, 0) * 100) / 100,
+    limit: same.length && same.every(p => p.limit != null) ? same.reduce((sum, p) => sum + (p.limit as number), 0) : null,
+    currency,
+  }
+}
 
-export function parseLive(text: string): SessionRateLimit[] {
+export function parseLive(text: string, now = Date.now(), extra: readonly Part[] = []): SessionRateLimit[] {
   const body = JSON.parse(text)
   const out: SessionRateLimit[] = []
   for (const [key, kind] of [['five_hour', 'five_hour'], ['seven_day', 'seven_day']] as const) {
@@ -445,7 +463,7 @@ export function parseLive(text: string): SessionRateLimit[] {
       out.push({ kind, percentUsed: Math.round(used * 10) / 10, ...(resetsAt ? { resetsAt } : {}) })
     }
   }
-  const credit = parseCredit(body)
+  const credit = parseCredit(body, now, extra)
   if (credit) out.push(credit)
   return out
 }
@@ -469,13 +487,14 @@ async function liveReading($: any, box: Shown, live: Live, gap = LIVE_EVERY - 5_
       auth: auth.handle,
       headers: { 'anthropic-beta': 'oauth-2025-04-20', 'content-type': 'application/json' },
     })
-    const limits = res.ok ? parseLive(res.text) : []
+    const prepaid = res.ok ? await prepaidReading($, auth.handle, now) : null
+    const limits = res.ok ? parseLive(res.text, now, prepaid ? [prepaid] : []) : []
     // The panel's last answer, as read: its status and the parts the bar uses,
     // kept beside the readings so a figure that looks wrong can be traced.
     try {
       const body = res.ok ? JSON.parse(res.text) : null
       await $.store.set(LIVE_ANSWER, { at: now, status: res.status, parsed: limits,
-        body: body && { five_hour: body.five_hour ?? null, seven_day: body.seven_day ?? null, extra_usage: body.extra_usage ?? null, spend: body.spend ?? null, limits: body.limits ?? null } })
+        body: body && Object.fromEntries(Object.entries(body).filter(([k, v]) => v != null && k !== 'seven_day_breakdown')) })
     } catch { /* only the trace is lost */ }
     if (!limits.length) { live.waitUntil = now + LIVE_BACKOFF; return }
     await adopt($, box, limits, await $.clock.now(), true, true)
@@ -493,30 +512,60 @@ async function liveReading($: any, box: Shown, live: Live, gap = LIVE_EVERY - 5_
 export const PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile'
 export const PLAN_EVERY = 6 * 3600_000
 const PLAN = 'plan'
-type Plan = { max: boolean; at: number }
+type Plan = { max: boolean; org: string | null; at: number }
 
-export function parseProfile(text: string): boolean | null {
+// Whether the plan is Max, and the organization the prepaid balance is kept under.
+export function parseProfile(text: string): { max: boolean; org: string | null } | null {
   const body = JSON.parse(text)
   const type = body?.organization?.organization_type
-  if (body?.account?.has_claude_max === true || type === 'claude_max') return true
-  if (typeof body?.account?.has_claude_max === 'boolean' || typeof type === 'string') return false
+  const org = typeof body?.organization?.uuid === 'string' ? body.organization.uuid : null
+  if (body?.account?.has_claude_max === true || type === 'claude_max') return { max: true, org }
+  if (typeof body?.account?.has_claude_max === 'boolean' || typeof type === 'string') return { max: false, org }
   return null
+}
+
+// Prepaid credit, bought ahead: kept apart from the usage reply, under the
+// organization. Read at most every few minutes, shared through the store; none
+// (or a plan without it) is remembered as none for as long.
+export const PREPAID_EVERY = 5 * 60_000
+const PREPAID = 'prepaid'
+export const prepaidUrl = (org: string) => `https://api.anthropic.com/api/oauth/organizations/${org}/prepaid/credits`
+async function prepaidReading($: any, handle: string, now: number): Promise<Part | null> {
+  try {
+    const held: any = await $.store.get(PREPAID)
+    if (held && now - held.at < PREPAID_EVERY) return held.part ?? null
+  } catch { /* read it anew */ }
+  let part: Part | null = null
+  try {
+    const org = ((await $.store.get(PLAN)) as any)?.org
+    if (typeof org !== 'string') return null
+    const res = await $.http.fetch(prepaidUrl(org), { auth: handle, headers: { 'content-type': 'application/json' } })
+    const body = res.ok ? JSON.parse(res.text) : null
+    // `amount` in cents; it counts as its own limit, so an untouched balance
+    // draws a full track.
+    if (typeof body?.amount === 'number' && Number.isFinite(body.amount)) {
+      const left = body.amount / 100
+      part = { left, limit: left, currency: typeof body.currency === 'string' ? body.currency.toUpperCase() : 'USD' }
+    }
+  } catch { /* none this time */ }
+  try { await $.store.set(PREPAID, { at: now, part }) } catch { /* read again next time */ }
+  return part
 }
 
 async function planReading($: any) {
   const now = await $.clock.now()
   try {
     const held: any = await $.store.get(PLAN)
-    if (held && typeof held.max === 'boolean' && now - held.at < PLAN_EVERY) return await update($, plan, () => held.max)
+    if (held && typeof held.max === 'boolean' && 'org' in held && now - held.at < PLAN_EVERY) return await update($, plan, () => held.max)
   } catch { /* read it anew */ }
   try {
     const auth = await $.session.authorize()
     if (!auth?.handle) return
     const res = await $.http.fetch(PROFILE_URL, { auth: auth.handle, headers: { 'content-type': 'application/json' } })
-    const max = res.ok ? parseProfile(res.text) : null
-    if (max == null) return
-    await update($, plan, () => max)
-    try { await $.store.set(PLAN, { max, at: now } satisfies Plan) } catch { /* read again next chat */ }
+    const profile = res.ok ? parseProfile(res.text) : null
+    if (profile == null) return
+    await update($, plan, () => profile.max)
+    try { await $.store.set(PLAN, { ...profile, at: now } satisfies Plan) } catch { /* read again next chat */ }
   } catch { /* unknown: the bar goes by whether a 5-hour window is reported */ }
 }
 
@@ -557,9 +606,9 @@ export const register: Register = on => {
       if (latest.at > box.current.at) await adopt($, box, latest.limits, latest.at, false, latest.live)
     })())
     // The usage panel's own figure, now and then once a minute among all chats.
-    void liveReading($, box, live)
+    // The plan first: it names the organization the prepaid balance is under.
+    void planReading($).then(() => liveReading($, box, live))
     $.clock.every(15_000, () => void liveReading($, box, live))
-    void planReading($)
     $.clock.every(PLAN_EVERY, () => void planReading($))
     // Keep reset countdowns moving between API responses.
     $.clock.every(30_000, () => void update($, tick, t => t + 1))
@@ -695,7 +744,7 @@ export const register: Register = on => {
     const credit = u?.credit ?? null
     const isMax = await read($, plan)
     const useCredit = isMax ?? (five.remaining == null && credit != null)
-    const creditLeft = credit?.percentUsed != null ? remainingPercent(credit.percentUsed) : null
+    const creditLeft = creditRemaining(credit)
     const second = useCredit ? { remaining: creditLeft, resetsAt: null } : five
     // Credit reads label, bar, amount: no percentage, no countdown. It is
     // measured as 5-hour's own texts, so it keeps 5-hour's width and sizes;
