@@ -450,7 +450,7 @@ test('plan unknown and no 5-hour window: the credit takes its slot, as label, ba
   const mount = () => $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) })
   let words = await shown(await mount())
   expect(exactly(words, 'Credit')).toBe(1)
-  expect(exactly(words, '$37')).toBe(1)     // 50.00 − 12.40 = 37.60 left, no cents
+  expect(exactly(words, '$37.60')).toBe(1)     // 50.00 − 12.40 = 37.60 left
   expect(exactly(words, '75%')).toBe(0)        // no percentage: the bar shows it
   expect((await (await mount()).findAll({ type: 'Svg' })).some((x: any) => /75%? left|75% left/.test(String(x.props?.alt)))).toBe(true)
   expect(exactly(words, '5-hour')).toBe(0)
@@ -459,7 +459,7 @@ test('plan unknown and no 5-hour window: the credit takes its slot, as label, ba
     { kind: 'seven_day', percentUsed: 97, resetsAt: resets },
   ] })
   words = await shown(await mount())
-  expect(exactly(words, '$37')).toBe(1)
+  expect(exactly(words, '$37.60')).toBe(1)
 })
 
 test('a 5-hour window, when the plan has one, keeps its slot over the credit', async ($, on) => {
@@ -487,7 +487,7 @@ test('Max: credit replaces the 5-hour reading even while one is reported', async
   await clock.advance(1)
   const words = await shown(await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) }))
   expect(exactly(words, 'Credit')).toBe(1)
-  expect(exactly(words, '$37')).toBe(1)
+  expect(exactly(words, '$37.60')).toBe(1)
   expect(exactly(words, '5-hour')).toBe(0)
   expect((db.plan as any).max).toBe(true)
 })
@@ -550,7 +550,7 @@ test('a live reading from a chat on an older version, without credit, keeps the 
   db.latestRateLimits = { at: clock.now() + 1000, live: true, limits: [{ kind: 'seven_day', percentUsed: 97, resetsAt: soon }] }
   await clock.advance(6_000)
   const words = await shown(await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) }))
-  expect(exactly(words, '$37')).toBe(1)
+  expect(exactly(words, '$37.60')).toBe(1)
 })
 
 test('a long credit balance keeps 5-hour\'s width: the ring goes first, then the label', async ($, on) => {
@@ -608,7 +608,7 @@ test('credit adds up every open source: promo, Claude Code and Cowork, and bough
   const none = credit({ spend: { used: usd(0), limit: null, percent: 0, enabled: false, balance: null }, extra_usage: { is_enabled: false } })
   expect(creditText(none)).toBe('$0')
   // The older extra_usage, in minor units.
-  expect(creditText(credit({ extra_usage: { is_enabled: true, monthly_limit: 5000, used_credits: 1240, utilization: 24.8, currency: 'usd' } }))).toBe('$37')
+  expect(creditText(credit({ extra_usage: { is_enabled: true, monthly_limit: 5000, used_credits: 1240, utilization: 24.8, currency: 'usd' } }))).toBe('$37.60')
 })
 
 test('Max with a $200 promo credit shows $200 with a full track', async ($, on) => {
@@ -669,5 +669,27 @@ test('an older chat\'s credit entry, in its earlier shape, neither shows nor rep
     { kind: 'credit', percentUsed: null, used: 0, limit: null, balance: 0, exponent: 2, currency: 'USD' }] }
   await clock.advance(6_000)
   const words = await shown(await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) }))
-  expect(exactly(words, '$37')).toBe(1)
+  expect(exactly(words, '$37.60')).toBe(1)
+})
+
+test('credit keeps its cents up to four digits ($99.99); from $100 it is whole dollars', () => {
+  const c = (left: number) => creditText({ left, limit: null, currency: 'USD' })
+  expect(c(0.7)).toBe('$0.70')
+  expect(c(9.999)).toBe('$9.99')               // rounded down, never up to $10.00
+  expect(c(0)).toBe('$0')
+  expect(c(37.6)).toBe('$37.60')
+  expect(c(99.999)).toBe('$99.99')
+  expect(c(100)).toBe('$100')
+  expect(c(1250.37)).toBe('$1,250')
+})
+
+test('the account\'s real mix: spend over its limit plus a $0.70 prepaid balance reads $0.70', () => {
+  const now = Date.parse('2026-11-03T00:00:00Z')
+  const usd = (n: number) => ({ amount_minor: n, currency: 'USD', exponent: 2 })
+  const parsed = parseLive(JSON.stringify({
+    spend: { used: usd(4142), limit: usd(4000), percent: 100, enabled: false, cap: { money: null, credits: { amount_minor: 4000, exponent: 2 } }, balance: null },
+    extra_usage: { is_enabled: false, monthly_limit: 4000, used_credits: 4142, utilization: 100, currency: 'USD', decimal_places: 2 },
+  }), now, [{ left: 0.7, limit: 0.7, currency: 'USD' }]).find(l => l.kind === 'credit_all') as any
+  expect(parsed.left).toBe(0.7)
+  expect(creditText(parsed)).toBe('$0.70')
 })

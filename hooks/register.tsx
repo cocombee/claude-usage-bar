@@ -44,11 +44,15 @@ export function resetText(resetsAtMs: number | null, now: number, compact = fals
   return days ? `${days}d ${hours}h` : hours ? (withMinutes ? `${hours}h ${mins}m` : `${hours}h`) : `${minutes}m`
 }
 
-// Credit's amount: what is left, in whole units with thousands commas: no
-// cents, rounded down so it never shows more than is there. $0 with none.
+// Credit's amount: what is left, rounded down so it never shows more than is
+// there. With four digits or fewer counting the cents (under 100) it keeps them
+// ($0.70, $37.60); from 100 it is whole units with thousands commas ($100,
+// $1,250). $0 with none.
 export function creditText(c: Credit) {
   const symbol = c.currency === 'USD' ? '$' : `${c.currency} `
-  return `${symbol}${String(Math.floor(Math.max(0, c.left))).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
+  const left = Math.max(0, c.left)
+  if (left > 0 && left < 100) return `${symbol}${(Math.floor(left * 100 + 1e-6) / 100).toFixed(2)}`
+  return `${symbol}${String(Math.floor(left)).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
 }
 // What is left as a share of the limits, for the track; null with no limit.
 export const creditRemaining = (c: Credit | null) =>
