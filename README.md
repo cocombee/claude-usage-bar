@@ -47,11 +47,28 @@ A size is used from its breakpoint up to the next bigger size's, and only where 
 
 ## Install
 
+Install it as a plugin for your user, so **every chat** gets it — in the terminal, the
+desktop app and the IDEs alike:
+
+```
+claude plugin marketplace add cocombee/claude-usage-bar
+claude plugin install usage-bar@cocombee
+```
+
+Or, inside a Claude Code terminal chat:
+
 ```
 /plugin install usage-bar --marketplace cocombee/claude-usage-bar
 ```
 
-Once installed it loads in every new chat. Reopen chats that were already open to pick it up.
+`claude plugin list` should then show `usage-bar@cocombee` with `Scope: user` and
+`Status: ✔ enabled`. It loads in every new chat; reopen chats that were already open
+(or run `/reload-plugins` in them) to pick it up. On Windows with the desktop app,
+`claude` may not be on your PATH: the app keeps its copy under
+`%LOCALAPPDATA%\Claude-Data\claude_<id>\claude-code\<version>\…\claude.exe`.
+
+Do not copy the folder into a chat's mods folder (`~/.claude/dev-mods/<session>/`):
+a mod there loads in that one chat only, never in any other.
 
 Installed from a folder, the plugin is read from that folder rather than copied, so edits
 there reach a chat at its next start or on `/reload-plugins` — a chat already running keeps
