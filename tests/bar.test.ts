@@ -287,13 +287,42 @@ for (const surface of ['terminal', 'desktop'] as const) {
       ? (await ui.findAll({ type: 'Svg' })).filter((s: any) => s.props.alt === 'divider')
       : (await ui.findAll({ type: 'Text' })).filter((t: any) => t.text === '│')
     expect(dividers.length).toBe(3)
-    for (const key of ['weekly', 'five-hour', 'speed', 'context']) {
-      const [r] = boxes.filter((b: any) => b.key === key || b.props.key === key)
+    const keyed = (key: string) => boxes.filter((b: any) => b.key === key || b.props.key === key)
+    // On the desktop, with tracks, Weekly's and 5-hour's parts sit straight in
+    // the row (one cell apart, as inside a reading); elsewhere they are readings.
+    const flat = surface === 'desktop' ? ['weekly', 'five-hour'] : []
+    for (const key of ['weekly', 'five-hour', 'speed', 'context'].filter(k => !flat.includes(k))) {
+      const [r] = keyed(key)
       expect(r!.props.columnGap).toBe(1)
       expect(r!.props.paddingX).toBeUndefined()
     }
+    for (const key of flat) {
+      expect(keyed(key).length).toBe(0)
+      expect(keyed(`${key}-meter`).length).toBe(1)
+    }
   })
 }
+
+// Weekly's and slot 2's tracks are the only parts of the row that grow, so they
+// always share its spare width equally, whatever the other readings' texts are.
+test('desktop: Weekly and 5-hour tracks are the only parts that grow, and grow alike', async ($, on) => {
+  mock.clock(on, { now: Date.now() })
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  await $.session.measure({
+    context: { tokens: 10, window: 100, percent: 10 },
+    rateLimits: [
+      { kind: 'seven_day', percentUsed: 5, resetsAt: inHours(15.2) },
+      { kind: 'five_hour', percentUsed: 15, resetsAt: inHours(2.1) },
+    ],
+    changed: ['context', 'rateLimits'],
+  })
+  const ui = await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(140) })
+  const boxes = await ui.findAll({ type: 'Box' })
+  // The row's own Box grows too; the parts inside it are what is checked.
+  const growing = boxes.filter((b: any) => b.props.flexGrow === 1 && b.props.flexDirection === 'column')
+  expect(growing.map((b: any) => b.key ?? b.props.key)).toEqual(['weekly-meter', 'five-hour-meter'])
+  expect(growing.every((b: any) => b.props.minWidth === growing[0]!.props.minWidth && b.props.flexShrink === 1)).toBe(true)
+})
 
 test('S gives up token speed but keeps Context', async ($, on) => {
   mock.clock(on, { now: Date.now() })

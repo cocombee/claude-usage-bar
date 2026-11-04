@@ -235,7 +235,9 @@ export function layoutFor(level: number): Layout {
   }
 }
 
-type Texts = { weekly: string[]; five: string[]; speed: string; context: string }
+// `secondLabel` / `lastLabel`: [full, short] for slot 2 and the last slot when they
+// are not 5-hour and Context (on Max: Context in slot 2, Credit last).
+type Texts = { weekly: string[]; five: string[]; speed: string; context: string; secondLabel?: [string, string]; lastLabel?: [string, string] }
 
 // The row's width at a layout, in cells, with tracks at their base: what the
 // drawing below lays out. Readings carry no chrome; a divider is counted as a
@@ -256,9 +258,11 @@ export function rowWidth(L: Layout, t: Texts, isTerminal: boolean) {
   const vw = Math.max((t.weekly[0] ?? '—').length, (t.five[0] ?? '—').length)
   const rw = Math.max((t.weekly[1] ?? '').length, (t.five[1] ?? '').length)
   const wk = quota(!L.quotaLabels ? '' : L.shortLabels ? 'Wk' : 'Weekly', (t.weekly[0] ?? '—').padStart(vw), (t.weekly[1] ?? '').padEnd(rw))
-  const fh = quota(!L.quotaLabels ? '' : L.shortLabels ? '5h' : '5-hour', (t.five[0] ?? '—').padStart(vw), (t.five[1] ?? '').padEnd(rw))
+  const [secondFull, secondShort] = t.secondLabel ?? ['5-hour', '5h']
+  const fh = quota(!L.quotaLabels ? '' : L.shortLabels ? secondShort : secondFull, (t.five[0] ?? '—').padStart(vw), (t.five[1] ?? '').padEnd(rw))
   const sp = L.speed ? textWidth(['⚡', t.speed, L.speedUnit]) : 0
-  const cx = L.context ? textWidth([L.contextLabel, t.context]) : 0
+  const lastLabel = t.lastLabel ? (L.contextLabel === 'Context' ? t.lastLabel[0] : t.lastLabel[1]) : L.contextLabel
+  const cx = L.context ? textWidth([lastLabel, t.context]) : 0
   const readings = 2 + (L.speed ? 1 : 0) + (L.context ? 1 : 0)
   return wk + fh + sp + cx + divider * (readings - 1)
 }
@@ -271,7 +275,7 @@ export function fitLevel(columns: number, isTerminal: boolean, t: Texts) {
     const texts = {
       weekly: [t.weekly[0] ?? '—', L.compactReset ? t.weekly[2] ?? '' : t.weekly[1] ?? ''],
       five: [t.five[0] ?? '—', L.compactReset ? t.five[2] ?? '' : t.five[1] ?? ''],
-      speed: t.speed, context: t.context,
+      speed: t.speed, context: t.context, secondLabel: t.secondLabel, lastLabel: t.lastLabel,
     }
     if (rowWidth(L, texts, isTerminal) <= columns) return level
   }
@@ -743,28 +747,24 @@ export const register: Register = on => {
 
     const weekly = windowState(u?.weekly ?? null, now)
     const five = windowState(u?.fiveHour ?? null, now)
-    // Plans without a 5-hour window (Max on credits) show their extra-usage
-    // credit in its place: what is left of the month's limit, and the amount.
+    // Plans without a 5-hour window (Max on credits) show their credit instead.
+    // Context then takes 5-hour's slot, with its meter and its sizes, and Credit
+    // takes Context's place at the end: label and amount, as wide as they are.
     const credit = u?.credit ?? null
     const isMax = await read($, plan)
     const useCredit = isMax ?? (five.remaining == null && credit != null)
     const creditLeft = creditRemaining(credit)
-    const second = useCredit ? { remaining: creditLeft, resetsAt: null } : five
-    // Credit reads label, bar, amount: no percentage, no countdown. It is
-    // measured as 5-hour's own texts, so it keeps 5-hour's width and sizes;
-    // a longer amount takes its room from the bar (see below).
-    const secondTexts = useCredit
-      ? ['99%', '4h 28m', '4h']
-      : [percentText(five.remaining), resetText(five.resetsAt, now), resetText(five.resetsAt, now, true)]
     const context = u?.context ?? null
     const speedValue = tps == null ? '—' : `~${tps}`
+    const creditValue = credit ? creditText(credit) : '—'
+    const weeklyTexts = [percentText(weekly.remaining), resetText(weekly.resetsAt, now, false, false), resetText(weekly.resetsAt, now, true)]
 
-    const level = fitLevel(columns, isTerminal, {
-      weekly: [percentText(weekly.remaining), resetText(weekly.resetsAt, now, false, false), resetText(weekly.resetsAt, now, true)],
-      five: secondTexts,
-      speed: speedValue,
-      context: percentText(context),
-    })
+    // Context in slot 2 is measured as 5-hour's own texts, so the sizes step at
+    // the same widths as they do with 5-hour there; only the last slot's length
+    // (Credit's amount) moves them.
+    const level = fitLevel(columns, isTerminal, useCredit
+      ? { weekly: weeklyTexts, five: ['99%', '4h 28m', '4h'], speed: speedValue, context: creditValue, lastLabel: ['Credit', 'Cr'] }
+      : { weekly: weeklyTexts, five: [percentText(five.remaining), resetText(five.resetsAt, now), resetText(five.resetsAt, now, true)], speed: speedValue, context: percentText(context) })
     const L = layoutFor(level)
 
     const quotaParts = (label: string, short: string, w: ReturnType<typeof windowState>, withMinutes: boolean) => ({
@@ -773,20 +773,16 @@ export const register: Register = on => {
       reset: L.reset ? resetText(w.resetsAt, now, L.compactReset, withMinutes) : null,
     })
     const wk = quotaParts('Weekly', 'Wk', weekly, false)
+    // Slot 2: 5-hour, or Context on Max (its meter fills with what is used).
     const fh = useCredit
-      ? { label: L.quotaLabels ? (L.shortLabels ? 'Cr' : 'Credit') : '', value: credit ? creditText(credit) : '—', reset: null }
+      ? { label: L.quotaLabels ? (L.shortLabels ? 'Ctx' : 'Context') : '', value: percentText(context), reset: null as string | null }
       : quotaParts('5-hour', '5h', five, true)
-    // Room for a credit amount longer than 5-hour's figure. Where a countdown
-    // would sit there is room enough, and a track gives way by itself; where
-    // there is none, the meter goes first, then the label.
-    const textCells = (t: string) => Math.ceil((isTerminal ? 1 : DESKTOP_TEXT) * t.length)
-    let creditOver = useCredit && !L.reset ? textCells(fh.value) - textCells('99%') : 0
-    const creditMeter = creditOver <= 0
-    if (!creditMeter) creditOver -= (desktop && L.ring ? RING_CELLS : TRACK_BASE) + 1
-    if (creditOver > 0 && fh.label) fh.label = ''
-    // Pad Weekly's and 5-hour's texts to equal widths with figure spaces, so the
+    const secondFill = useCredit ? (context == null ? null : clampPercent(context)) : five.remaining
+    const secondTone = useCredit ? contextTone(context) : quotaTone(five.remaining)
+    const secondAlt = useCredit ? (context == null ? 'unavailable' : `${Math.round(context)}% used`) : undefined
+    // Pad Weekly's and slot 2's texts to equal widths with figure spaces, so the
     // terminal's two tracks come out the same length.
-    const valueWidth = useCredit ? wk.value.length : Math.max(wk.value.length, fh.value.length)
+    const valueWidth = Math.max(wk.value.length, fh.value.length)
     wk.value = wk.value.padStart(valueWidth, FIGURE_SPACE)
     fh.value = fh.value.padStart(valueWidth, FIGURE_SPACE)
     if (wk.reset != null && fh.reset != null) {
@@ -795,56 +791,58 @@ export const register: Register = on => {
       fh.reset = fh.reset.padEnd(resetWidth, FIGURE_SPACE)
     }
 
-    // Terminal tracks take all the spare cells between them, so no reading is
-    // left with a wider gap before its divider than the rest. An odd cell goes to
-    // Weekly; one is held back for the ⚡, which the terminal draws two cells wide.
-    const natural = rowWidth(L, {
-      weekly: [percentText(weekly.remaining), wk.reset ?? ''], five: [useCredit ? fh.value : percentText(second.remaining), fh.reset ?? ''], speed: speedValue, context: percentText(context),
-    }, isTerminal)
+    // Terminal tracks take all the spare cells between them, half each, so they
+    // stay the same length. An odd cell goes to Weekly; one is held back for the
+    // ⚡, which the terminal draws two cells wide.
+    const natural = rowWidth(L, useCredit
+      ? { weekly: [percentText(weekly.remaining), wk.reset ?? ''], five: [fh.value, ''], speed: speedValue, context: creditValue, secondLabel: ['Context', 'Ctx'], lastLabel: ['Credit', 'Cr'] }
+      : { weekly: [percentText(weekly.remaining), wk.reset ?? ''], five: [percentText(five.remaining), fh.reset ?? ''], speed: speedValue, context: percentText(context) },
+    isTerminal)
     const spare = Math.max(0, columns - natural - (L.speed ? 1 : 0))
     const trackWidth = TRACK_BASE + Math.floor(spare / 2)
     const oddCell = spare % 2
 
     const toneColor = (t: Tone) => (t === 'low' ? 'error' : t === 'warning' ? 'warning' : 'text')
 
-    // A quota's meter. Desktop: a ring, or a 3px track that takes what its reading
-    // has spare. Terminal: a heavy line for what is left over a light one.
-    const meter = (remaining: number | null, extra = 0) => {
-      const tone = quotaTone(remaining)
-      const alt = remaining == null ? 'unavailable' : `${Math.round(remaining)}% left`
+    // A meter. Desktop: a ring, or a 3px track that takes its half of the row's
+    // spare width. Terminal: a heavy line for the fill over a light one.
+    const meter = (key: string, fill: number | null, tone: Tone, alt = fill == null ? 'unavailable' : `${Math.round(fill)}% left`, extra = 0) => {
       if (desktop && L.ring) {
         return (
-          <Box flexShrink={0} alignSelf="center">
-            <Svg source={ringSvg(remaining, tone)} alt={alt} width={RING_SIZE} height={RING_SIZE} />
+          <Box key={key} flexShrink={0} alignSelf="center">
+            <Svg source={ringSvg(fill, tone)} alt={alt} width={RING_SIZE} height={RING_SIZE} />
           </Box>
         )
       }
       if (desktop) {
         return (
-          <Box flexDirection="column" justifyContent="center" alignSelf="center" flexGrow={1} flexShrink={1} minWidth={2}>
-            <Svg source={trackSvg(remaining, tone)} alt={alt} height={TRACK_HEIGHT} />
+          <Box key={key} flexDirection="column" justifyContent="center" alignSelf="center" flexGrow={1} flexShrink={1} minWidth={TRACK_BASE}>
+            <Svg source={trackSvg(fill, tone)} alt={alt} height={TRACK_HEIGHT} />
           </Box>
         )
       }
       const width = trackWidth + extra
-      const filled = remaining == null ? 0 : Math.round((remaining / 100) * width)
+      const filled = fill == null ? 0 : Math.round((fill / 100) * width)
       return (
-        <Text>
+        <Text key={key}>
           <Text color={toneColor(tone)}>{'━'.repeat(filled)}</Text>
           <Text color="subtle">{'─'.repeat(width - filled)}</Text>
         </Text>
       )
     }
 
-    // A reading: its parts one cell apart, with no border, padding or fill. Quota
-    // readings with tracks share the row's spare width; the rest hug their content.
+    // A reading: its parts one cell apart, with no border, padding or fill.
     const reading = (key: string, grow: boolean, children: any[]) => (
       <Box key={key} flexDirection="row" columnGap={1} alignItems="center" flexGrow={grow ? 1 : 0} flexShrink={grow ? 1 : 0} minWidth={0} overflow="hidden">
         {children}
       </Box>
     )
+    const gap = DIVIDER_GAP[isTerminal ? 'terminal' : 'desktop']
+    // Where readings are laid out flat (desktop tracks) the row's gap is a part's
+    // one cell, and the divider makes up the rest of DIVIDER_GAP with its margin.
+    const flat = desktop && !L.ring
     const divider = (key: string) => (
-      <Box key={key} flexShrink={0} alignSelf="center">
+      <Box key={key} flexShrink={0} alignSelf="center" {...(flat ? { marginX: gap - 1 } : {})}>
         {desktop
           ? <Svg source={DIVIDER_SVG} alt="divider" width={1} height={DIVIDER_HEIGHT} />
           : <Text color="promptBorder">│</Text>}
@@ -858,46 +856,63 @@ export const register: Register = on => {
     // there. Each text part holds its width: a bare Text shrinks before a track
     // does and wraps ("15h 0m" broke onto two lines).
     const shown = (t: string) => (isTerminal ? t : t.split(FIGURE_SPACE).join(''))
-    const part = (child: any) => <Box flexShrink={0}>{child}</Box>
-    const figure = (text: string, tone: Tone) =>
-      part(<Text color={tone === 'normal' ? undefined : toneColor(tone)}>{shown(text)}</Text>)
-    const quotaReading = (key: string, p: typeof wk, w: ReturnType<typeof windowState>, extra = 0, withMeter = true) =>
-      reading(key, !(desktop && L.ring), [
-        ...(p.label ? [part(<Text color="inactive">{shown(p.label)}</Text>)] : []),
-        ...(withMeter ? [meter(w.remaining, extra)] : []),
-        figure(p.value, quotaTone(w.remaining)),
-        ...(p.reset == null ? [] : [part(<Text color="inactive">{shown(p.reset)}</Text>)]),
-      ])
+    const part = (key: string, child: any) => <Box key={key} flexShrink={0}>{child}</Box>
+    const figure = (key: string, text: string, tone: Tone) =>
+      part(key, <Text color={tone === 'normal' ? undefined : toneColor(tone)}>{shown(text)}</Text>)
+    // A quota's parts: label · meter · figure · countdown.
+    const quotaParts2 = (key: string, p: typeof wk, fill: number | null, tone: Tone, alt?: string, extra = 0) => [
+      ...(p.label ? [part(`${key}-label`, <Text color="inactive">{shown(p.label)}</Text>)] : []),
+      meter(`${key}-meter`, fill, tone, alt, extra),
+      figure(`${key}-figure`, p.value, tone),
+      ...(p.reset == null ? [] : [part(`${key}-reset`, <Text color="inactive">{shown(p.reset)}</Text>)]),
+    ]
+    const secondKey = useCredit ? 'context' : 'five-hour'
+    const quotas = [
+      { key: 'weekly', parts: quotaParts2('weekly', wk, weekly.remaining, quotaTone(weekly.remaining), undefined, oddCell) },
+      { key: secondKey, parts: quotaParts2(secondKey, fh, secondFill, secondTone, secondAlt) },
+    ]
 
-    const readings = [
-      quotaReading('weekly', wk, weekly, oddCell),
-      quotaReading(useCredit ? 'credit' : 'five-hour', fh, second, 0, creditMeter),
+    const rest = [
       L.speed
         ? reading('speed', false, [
             desktop
-              ? <Svg source={BOLT_SVG} alt="token speed" width={BOLT_WIDTH} height={BOLT_HEIGHT} />
-              : <Text color="inactive">⚡</Text>,
-            <Text>{speedValue}</Text>,
-            <Text color="inactive">{L.speedUnit}</Text>,
+              ? <Svg key="bolt" source={BOLT_SVG} alt="token speed" width={BOLT_WIDTH} height={BOLT_HEIGHT} />
+              : <Text key="bolt" color="inactive">⚡</Text>,
+            <Text key="value">{speedValue}</Text>,
+            <Text key="unit" color="inactive">{L.speedUnit}</Text>,
           ])
         : null,
+      // The last slot: Context, or Credit on Max. Credit's figure takes the tone
+      // of what is left of its limits.
       L.context
-        ? reading('context', false, [
-            <Text color="inactive">{L.contextLabel}</Text>,
-            figure(percentText(context), contextTone(context)),
-          ])
+        ? useCredit
+          ? reading('credit', false, [
+              <Text key="label" color="inactive">{L.contextLabel === 'Context' ? 'Credit' : 'Cr'}</Text>,
+              figure('figure', creditValue, quotaTone(creditLeft)),
+            ])
+          : reading('context', false, [
+              <Text key="label" color="inactive">{L.contextLabel}</Text>,
+              figure('figure', percentText(context), contextTone(context)),
+            ])
         : null,
     ].filter(Boolean)
 
     // Readings with a divider between each two, DIVIDER_GAP either side of it;
-    // the desktop's side spacers give the ends the same space. Rings don't
-    // stretch, so where they are drawn the spare room is spread evenly instead.
+    // the desktop's side spacers give the ends the same space. With desktop
+    // tracks, Weekly's and slot 2's parts sit straight in the row, so their two
+    // tracks are the only parts that grow and always share the spare width
+    // equally: as the other readings' texts get longer or shorter, both tracks
+    // change together and the divider between them moves. Rings don't stretch,
+    // so where they are drawn the spare room is spread evenly instead.
     // Spacing is in plain cells: older Claude Code builds refuse named steps.
+    const items = flat
+      ? [quotas[0]!.parts, quotas[1]!.parts, ...rest.map(r => [r])]
+      : [...quotas.map(q => [reading(q.key, !(desktop && L.ring), q.parts)]), ...rest.map(r => [r])]
     const bar = (
       <Box flexDirection="row" flexWrap="nowrap" overflow="hidden">
         {sideSpacer('left')}
-        <Box flexDirection="row" columnGap={DIVIDER_GAP[isTerminal ? 'terminal' : 'desktop']} alignItems="center" justifyContent={desktop && L.ring ? 'space-evenly' : 'flex-start'} flexWrap="nowrap" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
-          {readings.flatMap((r, i) => (i === 0 ? [r] : [divider(`divider-${i}`), r]))}
+        <Box flexDirection="row" columnGap={flat ? 1 : gap} alignItems="center" justifyContent={desktop && L.ring ? 'space-evenly' : 'flex-start'} flexWrap="nowrap" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+          {items.flatMap((r, i) => (i === 0 ? r : [divider(`divider-${i}`), ...r]))}
         </Box>
         {sideSpacer('right')}
       </Box>

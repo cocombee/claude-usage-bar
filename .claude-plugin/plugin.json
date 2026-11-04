@@ -1,1 +1,1 @@
-{ "name": "usage-bar", "version": "0.2.3", "description": "Weekly usage, 5-hour usage or credit, token speed and context in one row above the prompt", "author": { "name": "cocombee" }, "types": "./types/index.d.ts" }
+{ "name": "usage-bar", "version": "0.3.0", "description": "Weekly usage, 5-hour usage or credit, token speed and context in one row above the prompt", "author": { "name": "cocombee" }, "types": "./types/index.d.ts" }

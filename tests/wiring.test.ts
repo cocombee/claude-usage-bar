@@ -1,6 +1,6 @@
 import { test, expect, mock } from 'claude-code/testing'
 
-import { shown, exactly } from './shown'
+import { shown, exactly, like } from './shown'
 import { repairStore, foldLimits, parseLive, parseProfile, creditText, prepaidUrl, LIVE_URL, PROFILE_URL } from '../hooks/register'
 
 // Wiring: every figure comes from the engine's own events, as a session raises them.
@@ -437,7 +437,7 @@ test('folding: same window keeps the higher figure; a new window is taken as it 
 // Plans without a 5-hour window show their extra-usage credit in its place.
 const credit = { is_enabled: true, monthly_limit: 5000, used_credits: 1240, utilization: 24.8, currency: 'usd' }
 
-test('plan unknown and no 5-hour window: the credit takes its slot, as label, bar and amount', async ($, on) => {
+test('plan unknown and no 5-hour window: Context takes the slot, and Credit (label and amount) goes last', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   sharedStore(on)
   const resets = new Date(clock.now() + 4 * 24 * HOUR).toISOString()
@@ -451,9 +451,13 @@ test('plan unknown and no 5-hour window: the credit takes its slot, as label, ba
   let words = await shown(await mount())
   expect(exactly(words, 'Credit')).toBe(1)
   expect(exactly(words, '$37.60')).toBe(1)     // 50.00 − 12.40 = 37.60 left
-  expect(exactly(words, '75%')).toBe(0)        // no percentage: the bar shows it
-  expect((await (await mount()).findAll({ type: 'Svg' })).some((x: any) => /75%? left|75% left/.test(String(x.props?.alt)))).toBe(true)
+  expect(exactly(words, '75%')).toBe(0)        // no percentage, and no meter of its own
+  expect((await (await mount()).findAll({ type: 'Svg' })).some((x: any) => /% left/.test(String(x.props?.alt)) && !/^3% left$/.test(String(x.props?.alt)))).toBe(false)
   expect(exactly(words, '5-hour')).toBe(0)
+  // Weekly · Context · (speed) · Credit
+  expect(words.indexOf('Weekly')).toBeLessThan(words.indexOf('Context'))
+  expect(words.indexOf('Context')).toBeLessThan(words.indexOf('Credit'))
+  expect(words.indexOf('Credit')).toBe(words.indexOf('$37.60') - 1)
   // A later reply's headers have no credit in them: the panel's stays.
   await $.session.measure({ context: { window: 200_000 }, changed: ['rateLimits'], rateLimits: [
     { kind: 'seven_day', percentUsed: 97, resetsAt: resets },
@@ -553,7 +557,7 @@ test('a live reading from a chat on an older version, without credit, keeps the 
   expect(exactly(words, '$37.60')).toBe(1)
 })
 
-test('a long credit balance keeps 5-hour\'s width: the ring goes first, then the label', async ($, on) => {
+test('a long credit balance takes room at the end; where it no longer fits, the bar steps down a size', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   sharedStore(on, { plan: { max: true, at: 1_000_000 } })
   const soon = new Date(clock.now() + 2 * HOUR).toISOString()
@@ -569,17 +573,20 @@ test('a long credit balance keeps 5-hour\'s width: the ring goes first, then the
     const rings = (await ui.findAll({ type: 'Svg' })).filter((x: any) => String(x.props?.source).includes('<circle')).length
     return { words: await shown(ui), rings }
   }
-  // The same sizes as 5-hour: XL from 68 columns keeps full labels' short form and countdowns.
+  // Credit sits last with its label, as wide as its amount; Context keeps slot 2.
   const xl = await at(68)
+  expect(exactly(xl.words, 'Ctx')).toBe(1)
   expect(exactly(xl.words, 'Cr')).toBe(1)
   expect(exactly(xl.words, '$12,345')).toBe(1)
-  expect(exactly(xl.words, '5d')).toBe(0)
-  // M (rings): "$12,345" is 3 cells wider than "99%": its ring goes, and then its label.
+  // At M's width a five-digit amount no longer fits with token speed: the bar
+  // steps down a size (speed goes) and keeps Credit whole, label and all.
   const m = await at(51)
   expect(exactly(m.words, 'Wk')).toBe(1)
-  expect(exactly(m.words, 'Cr')).toBe(0)
+  expect(exactly(m.words, 'Ctx')).toBe(1)
+  expect(exactly(m.words, 'Cr')).toBe(1)
   expect(exactly(m.words, '$12,345')).toBe(1)
-  expect(m.rings).toBe(1)                       // Weekly's ring only
+  expect(like(m.words, 't/s')).toBe(0)
+  expect(m.rings).toBe(2)                       // Weekly's and Context's
 })
 
 test('credit adds up every open source: promo, Claude Code and Cowork, and bought', () => {
@@ -611,7 +618,7 @@ test('credit adds up every open source: promo, Claude Code and Cowork, and bough
   expect(creditText(credit({ extra_usage: { is_enabled: true, monthly_limit: 5000, used_credits: 1240, utilization: 24.8, currency: 'usd' } }))).toBe('$37.60')
 })
 
-test('Max with a $200 promo credit shows $200 with a full track', async ($, on) => {
+test('Max with a $200 promo credit shows $200 in its normal colour', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   sharedStore(on, { plan: { max: true, at: 1_000_000 } })
   const soon = new Date(clock.now() + 2 * HOUR).toISOString(), month = new Date(clock.now() + 20 * 24 * HOUR).toISOString()
@@ -624,7 +631,8 @@ test('Max with a $200 promo credit shows $200 with a full track', async ($, on) 
   await clock.advance(1)
   const ui = await $.ui.mount({ plugin: 'usage-bar', surface: 'desktop', component: 'AbovePrompt', props: props(160) })
   expect(exactly(await shown(ui), '$200')).toBe(1)
-  expect((await ui.findAll({ type: 'Svg' })).some((x: any) => x.props?.alt === '100% left')).toBe(true)
+  const [amount] = await ui.findAll({ type: 'Text', text: /^\$200$/ })
+  expect(amount!.props.color).toBeUndefined()   // all of it left: no warning tone
 })
 
 test('prepaid credit, read under the organization the profile names, adds to the total', async ($, on) => {
